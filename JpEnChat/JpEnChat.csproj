@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project Sdk="Dalamud.NET.Sdk/15.0.0">
+  <PropertyGroup>
+    <Version>0.1.0.0</Version>
+    <AssemblyName>JpEnChat</AssemblyName>
+    <RootNamespace>JpEnChat</RootNamespace>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+
+    <!-- Manifest fields consumed by DalamudPackager -->
+    <Name>JP/EN Chat</Name>
+    <Author>colliexiv</Author>
+    <Punchline>Two-pane JP/EN chat translation for English players on Japanese data centers.</Punchline>
+    <Description>Shows chat in a two-pane window with the original Japanese on the left and a streamed English translation on the right, aligned row by row.
+Type English into the input box to get a Japanese translation with a word-by-word breakdown and back-translation, confirm, and send.
+Translation uses your own OpenRouter API key. Work in progress.</Description>
+    <RepoUrl>https://github.com/colliexiv/ffxivjpentranslate</RepoUrl>
+    <Tags>chat;translation;japanese;english</Tags>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- DPAPI for API key storage. Not part of the base shared framework reference pack. -->
+    <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="10.0.0" />
+  </ItemGroup>
+</Project>
