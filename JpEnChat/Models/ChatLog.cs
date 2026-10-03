@@ -8,7 +8,7 @@ namespace JpEnChat.Models;
 /// Bounded, ordered store of <see cref="ChatLine"/> rows shown by the main window (PLAN §4).
 /// </summary>
 /// <remarks>
-/// <para>Writers (ingest, the outgoing send path, test commands) call <see cref="Add"/> on the framework thread.
+/// <para>Writers (ingest and the outgoing send path) call <see cref="Add"/> on the framework thread.
 /// The window reads through <see cref="Snapshot"/> on the draw thread. All list access happens under one short
 /// lock, so the type is safe even if a writer ends up on another thread.</para>
 /// <para><see cref="Snapshot"/> returns a cached array that is rebuilt only when <see cref="Version"/> changed

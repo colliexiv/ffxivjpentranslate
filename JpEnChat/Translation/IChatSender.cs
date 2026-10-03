@@ -1,7 +1,7 @@
 namespace JpEnChat.Translation;
 
 /// <summary>
-/// Sends a line through the game's chat box as if typed (Phase 3: <c>UIModule.ProcessChatBoxEntry</c>
+/// Sends a line through the game's chat box as if typed (<see cref="JpEnChat.Chat.GameChatSender"/>: <c>UIModule.ProcessChatBoxEntry</c>
 /// after <c>Utf8String.SanitizeString</c>, PLAN §4.1).
 /// </summary>
 /// <remarks>

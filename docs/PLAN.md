@@ -365,15 +365,49 @@ Framework.RunOnFrameworkThread(() => Send("/p " + ja));
 
 ## 7. Milestones
 
-| # | Scope | Output |
-|---|---|---|
-| M0 | Skeleton: SDK csproj, `/jpchat`, empty window, config, DPAPI key storage | loads in dev mode |
-| M1 | Ingest + two-pane log with `…` placeholder, script-based language detect | rows appear instantly |
-| M2 | OpenRouter streaming translation, bounded concurrency, timing logs | right column fills in <0.5 s typical |
-| M3 | Normalized exact cache, per-sender debounce/batching | macros translated as a unit, repeats instant |
-| M4 | Outgoing: EN input → structured JA + breakdown → confirm → `ProcessChatBoxEntry` | can chat in JP |
-| M5 | Polish: channel colors, tabs/filters, byte counter, politeness toggle, `repo.json` release | installable from custom repo |
-| v2 | Hide vanilla chat, backfill history from `RaptureLogModule`, optional LLM gate for ambiguous bursts, glossary editor | |
+| # | Scope | Output | State |
+|---|---|---|---|
+| M0 | Skeleton: SDK csproj, `/jpchat`, empty window, config, DPAPI key storage | loads in dev mode | done (Phase 1) |
+| M1 | Ingest + two-pane log with `…` placeholder, script-based language detect | rows appear instantly | done (Phases 2A, 2B, 3) |
+| M2 | OpenRouter streaming translation, bounded concurrency, timing logs | right column fills in <0.5 s typical | done (Phase 2A) |
+| M3 | Normalized exact cache, per-sender debounce/batching | macros translated as a unit, repeats instant | done (Phase 2A) |
+| M4 | Outgoing: EN input → structured JA + breakdown → confirm → `ProcessChatBoxEntry` | can chat in JP | done (Phases 2A, 2B, 3) |
+| M5 | Polish: channel colors, tabs/filters, byte counter, politeness toggle, `repo.json` release | installable from custom repo | done (Phases 2B, 3) |
+| v2 | Hide vanilla chat, backfill history from `RaptureLogModule`, optional LLM gate for ambiguous bursts, glossary editor | | open |
+
+"Done" means implemented, building with zero warnings and unit-tested; in-game verification is still pending (README,
+"Known unverified").
+
+### 7.1 Implementation notes (deviations from this plan)
+
+- **Reasoning effort**: `Configuration.ReasoningEffort` defaults to `"low"`; an empty string omits the `reasoning`
+  object entirely, for models without thinking.
+- **`max_tokens`**: not a fixed 300. Incoming batches use `clamp(1024 + 3 × chars + 8 × lines, 1024, 4096)`, outgoing
+  uses 4096, because Gemini 3.x reasoning tokens count against `max_tokens` and a tight cap truncated the answer.
+  Billing is per generated token, so the headroom is free.
+- **Debounce caps**: the per-sender timer restarts on every line, but a batch waits at most 3 × the debounce after its
+  first line, and a batch of 10 lines is sent immediately, so a chatty sender cannot starve their own translations.
+  `MaxConcurrency` is read once at load.
+- **Enter while confirming**: Enter in the EN box sends when the English is unchanged since the translation (so
+  "Enter, Enter" sends even if focus stayed in the EN box) and re-translates when it changed. Ctrl+Enter sends without
+  re-translating.
+- **Enter on an empty EN box** returns keyboard focus to the game, like the vanilla chat box.
+- **`/jpchat test` removed**: the development subcommand that added sample rows is gone now that ingest provides real
+  rows.
+- **Outgoing requests go through the pipeline** (`TranslationPipeline.TranslateOutgoingAsync`), so unloading the
+  plugin cancels one in flight.
+- **Message flattening** (`Chat/SeStringText`): text payloads are kept (link names included), auto-translate phrases
+  become `《phrase》` (placeholder `《auto-translate》` if unresolvable), player links become the name once, newlines
+  become spaces, private-use glyphs U+E000–U+F8FF become spaces, whitespace is collapsed.
+- **Own messages**: own = sender name equals `IPlayerState.CharacterName` and either the sender has no player link (the
+  game sends your own name as plain text) or its world is your home world. `TellOutgoing` is always kept (sender is
+  the target), except the echo of a tell the plugin itself just sent, which is dropped because the composer already
+  added that row.
+- **Send path**: `UIModule.ProcessChatBoxEntry(Utf8String*, nint a4 = 0, bool saveToHistory = false)`, as ChatTwo's
+  normal send and ECommons do. `RaptureShellModule.ExecuteCommandInner` exists too but only runs commands (ChatTwo
+  uses it for one special tell case). Before the game call, `ChatSendValidation` rejects empty text, more than
+  500 UTF-8 bytes and control characters; then the text must survive `SanitizeString((AllowedEntities)0x27F)`
+  unchanged.
 
 ---
 

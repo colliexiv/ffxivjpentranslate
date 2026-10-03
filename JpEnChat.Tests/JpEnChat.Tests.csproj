@@ -34,7 +34,7 @@
   <ItemGroup>
     <!--
       The plugin references Dalamud with Private=false (Dalamud supplies it at runtime). Tests load ChatLine
-      (XivChatType) and Configuration (IPluginConfiguration, Newtonsoft attributes), so copy those assemblies
+      (XivChatType), Configuration (IPluginConfiguration, Newtonsoft attributes) and SeString payloads, so copy those assemblies
       next to the test host. Only type metadata is used; no Dalamud service is ever started.
     -->
     <Reference Include="Dalamud">
@@ -43,6 +43,15 @@
     </Reference>
     <Reference Include="Newtonsoft.Json">
       <HintPath>$(DalamudLibPath)Newtonsoft.Json.dll</HintPath>
+      <Private>true</Private>
+    </Reference>
+    <!-- SeString payload tests (SeStringTextTests) construct PlayerPayload/ItemPayload, whose members expose Lumina types. -->
+    <Reference Include="Lumina">
+      <HintPath>$(DalamudLibPath)Lumina.dll</HintPath>
+      <Private>true</Private>
+    </Reference>
+    <Reference Include="Lumina.Excel">
+      <HintPath>$(DalamudLibPath)Lumina.Excel.dll</HintPath>
       <Private>true</Private>
     </Reference>
   </ItemGroup>

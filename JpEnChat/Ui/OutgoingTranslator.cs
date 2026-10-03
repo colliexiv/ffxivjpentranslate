@@ -25,21 +25,14 @@ public interface IOutgoingTranslator
     Task<OutgoingDraft> TranslateOutgoingAsync(OutgoingDraft draft, CancellationToken ct);
 }
 
-/// <summary>Adapts the pipeline's <see cref="ITranslator"/> to <see cref="IOutgoingTranslator"/>.</summary>
-public sealed class TranslatorOutgoingAdapter(ITranslator inner) : IOutgoingTranslator
-{
-    private readonly ITranslator inner = inner ?? throw new ArgumentNullException(nameof(inner));
-
-    public Task<OutgoingDraft> TranslateOutgoingAsync(OutgoingDraft draft, CancellationToken ct) =>
-        inner.TranslateOutgoingAsync(draft, ct);
-}
-
 /// <summary>
-/// Placeholder used until the translation pipeline is wired in <see cref="Plugin"/> (Phase 2A).
-/// Every request fails with a clear message so the UI's error path can be exercised in-game.
+/// Routes outgoing requests through <see cref="TranslationPipeline.TranslateOutgoingAsync"/>, so unloading the plugin
+/// (pipeline dispose) cancels a request that is still in flight, in addition to the composer's own token.
 /// </summary>
-public sealed class UnwiredOutgoingTranslator : IOutgoingTranslator
+public sealed class PipelineOutgoingTranslator(TranslationPipeline pipeline) : IOutgoingTranslator
 {
+    private readonly TranslationPipeline pipeline = pipeline ?? throw new ArgumentNullException(nameof(pipeline));
+
     public Task<OutgoingDraft> TranslateOutgoingAsync(OutgoingDraft draft, CancellationToken ct) =>
-        Task.FromException<OutgoingDraft>(new NotImplementedException("pipeline not wired"));
+        pipeline.TranslateOutgoingAsync(draft, ct);
 }

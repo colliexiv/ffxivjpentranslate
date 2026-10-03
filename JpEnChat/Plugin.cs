@@ -1,10 +1,11 @@
 using System;
 using System.Threading.Tasks;
 using Dalamud.Game.Command;
-using Dalamud.Game.Text;
 using Dalamud.Interface.Windowing;
 using Dalamud.Plugin;
+using JpEnChat.Chat;
 using JpEnChat.Models;
+using JpEnChat.Translation;
 using JpEnChat.Ui;
 using JpEnChat.Windows;
 
@@ -21,6 +22,11 @@ public sealed class Plugin : IDalamudPlugin
     private readonly WindowSystem windowSystem = new("JpEnChat");
     private readonly MainWindow mainWindow;
     private readonly ConfigWindow configWindow;
+    private readonly LruTranslationCache cache;
+    private readonly OpenRouterClient client;
+    private readonly TranslationPipeline pipeline;
+    private readonly IChatSender chatSender;
+    private readonly ChatIngest ingest;
 
     private uint cachedWorldId = uint.MaxValue;
     private string cachedWorldName = string.Empty;
@@ -39,33 +45,30 @@ public sealed class Plugin : IDalamudPlugin
 
         ChatLog = new ChatLog(() => Configuration.MaxLogLines);
 
-        // TODO(Phase 2A): construct the translation pipeline here and pass it to consumers:
-        //   ILanguageDetector  -> ScriptLanguageDetector (kana/kanji ranges, no network)
-        //   ITranslationCache  -> LruTranslationCache(pluginInterface.GetPluginConfigDirectory(), Configuration); Load()
-        //   ITranslator        -> OpenRouterTranslator(Configuration, Services.Log) with a SemaphoreSlim(MaxConcurrency)
-        //   Gate               -> per-sender debounce + cache lookup, emits batches to ITranslator,
-        //                         marshals deltas to ChatLine via Services.Framework.RunOnFrameworkThread
-        // Dispose order on unload: cancel the pipeline's CancellationTokenSource, then cache.Save().
-        //
-        // Phase 2B placeholders to replace once the pipeline exists:
-        //   outgoingTranslator -> new TranslatorOutgoingAdapter(translator)
-        //   RetryLine          -> re-submit the line to the Gate (set Status = Pending, Error = null first)
-        //   cache callbacks    -> cache.Clear() / cache.Count for the settings window
-        IOutgoingTranslator outgoingTranslator = new UnwiredOutgoingTranslator();
+        // Translation core (PLAN §3.2–3.3). The cache is loaded once here; the pipeline saves it periodically and on dispose.
+        var log = new PluginLogAdapter(Services.Log);
+        cache = new LruTranslationCache(pluginInterface.GetPluginConfigDirectory(), () => Configuration.MaxCacheEntries, log);
+        cache.Load();
+        client = new OpenRouterClient(() => Configuration.OpenRouterKey, () => Configuration.RequestTimeoutSeconds, log);
+        var translator = new OpenRouterTranslator(Configuration, client, log);
+        pipeline = new TranslationPipeline(
+            Configuration,
+            new ScriptLanguageDetector(),
+            cache,
+            translator,
+            action => Services.Framework.RunOnFrameworkThread(action),
+            log);
 
-        // TODO(Phase 3): construct ingest and send:
-        //   ChatIngest   -> subscribes Services.ChatGui.ChatMessage (IHandleableChatMessage), builds ChatLine,
-        //                   pushes into ChatLog and the Gate. Unsubscribe in Dispose.
-        //   IChatSender  -> GameChatSender (UIModule.ProcessChatBoxEntry, framework thread only); replace SendStub with
-        //                   text => Services.Framework.RunOnFrameworkThread(() => chatSender.Send(text)).
+        // Game I/O (PLAN §3.1, §4.1 step 4).
+        chatSender = new GameChatSender(log);
 
-        configWindow = new ConfigWindow(Configuration, ClearCacheStub, () => 0);
+        configWindow = new ConfigWindow(Configuration, cache.Clear, () => cache.Count);
         mainWindow = new MainWindow(
             Configuration,
             ChatLog,
-            outgoingTranslator,
-            SendStub,
-            RetryLine,
+            new PipelineOutgoingTranslator(pipeline),
+            SendChat,
+            pipeline.Retry,
             CurrentWorldName,
             LocalPlayerName,
             OpenConfig);
@@ -75,13 +78,15 @@ public sealed class Plugin : IDalamudPlugin
 
         Services.CommandManager.AddHandler(CommandName, new CommandInfo(OnCommand)
         {
-            HelpMessage = "Toggle the JP/EN chat window. \"/jpchat config\" opens settings. "
-                          + "\"/jpchat test\" adds sample rows (development aid).",
+            HelpMessage = "Toggle the JP/EN chat window. \"/jpchat config\" opens settings.",
         });
 
         pluginInterface.UiBuilder.Draw += windowSystem.Draw;
         pluginInterface.UiBuilder.OpenMainUi += ToggleMainUi;
         pluginInterface.UiBuilder.OpenConfigUi += ToggleConfigUi;
+
+        // Subscribe last, so no chat line arrives before everything it touches exists.
+        ingest = new ChatIngest(Configuration, ChatLog, pipeline, log);
     }
 
     public Configuration Configuration { get; }
@@ -91,18 +96,21 @@ public sealed class Plugin : IDalamudPlugin
 
     public void Dispose()
     {
+        // Stop new lines first, then the UI, then cancel in-flight translations (the pipeline saves the cache).
+        ingest.Dispose();
+
         pluginInterface.UiBuilder.Draw -= windowSystem.Draw;
         pluginInterface.UiBuilder.OpenMainUi -= ToggleMainUi;
         pluginInterface.UiBuilder.OpenConfigUi -= ToggleConfigUi;
 
         Services.CommandManager.RemoveHandler(CommandName);
 
-        // TODO(Phase 3): unsubscribe ChatIngest before tearing down the pipeline.
-        // TODO(Phase 2A): cancel in-flight translations, then persist ITranslationCache.
-
         windowSystem.RemoveAllWindows();
         configWindow.Dispose();
         mainWindow.Dispose();
+
+        pipeline.Dispose();
+        client.Dispose();
     }
 
     private void OnCommand(string command, string args)
@@ -111,13 +119,6 @@ public sealed class Plugin : IDalamudPlugin
         if (sub.Equals("config", StringComparison.OrdinalIgnoreCase))
         {
             OpenConfig();
-            return;
-        }
-
-        if (sub.Equals("test", StringComparison.OrdinalIgnoreCase))
-        {
-            AddSampleRows();
-            mainWindow.IsOpen = true;
             return;
         }
 
@@ -155,59 +156,14 @@ public sealed class Plugin : IDalamudPlugin
     private static string LocalPlayerName() =>
         Services.PlayerState.IsLoaded ? Services.PlayerState.CharacterName : string.Empty;
 
-    // ---- Phase 2B placeholders (see TODOs in the constructor) ----
-
-    private static Task SendStub(string text)
-    {
-        Services.Log.Info($"[JpEnChat] send not wired (Phase 3); would send {text.Length} chars.");
-        return Task.FromException(new InvalidOperationException("Sending is not wired yet (Phase 3)."));
-    }
-
-    private static void RetryLine(ChatLine line)
-    {
-        Services.Log.Info($"[JpEnChat] retry requested for line {line.Id}; pipeline not wired (Phase 2A).");
-    }
-
-    private static void ClearCacheStub()
-    {
-        Services.Log.Info("[JpEnChat] clear cache requested; cache not wired (Phase 2A).");
-    }
-
     /// <summary>
-    /// Development aid for checking the UI in-game before ingest exists: adds a translated, a pending and a failed row.
-    /// TODO(release): remove together with the "test" subcommand once ingest (Phase 3) lands.
+    /// Sends one confirmed chat command on the framework thread. Registers it with ingest first so the game's echo of a
+    /// tell is not logged twice (the composer adds the sent row itself).
     /// </summary>
-    private void AddSampleRows()
-    {
-        var world = CurrentWorldName();
-        ChatLog.Add(new ChatLine
+    private Task SendChat(string command) =>
+        Services.Framework.RunOnFrameworkThread(() =>
         {
-            Kind = XivChatType.Party,
-            SenderName = "Tanaka Taro",
-            SenderWorld = world,
-            Original = "よろしくお願いします！",
-            OriginalLang = Lang.Ja,
-            Status = TranslationStatus.Done,
-            Translation = "Nice to meet you, looking forward to working with you!",
+            ingest.ExpectOwnEcho(command);
+            chatSender.Send(command);
         });
-        ChatLog.Add(new ChatLine
-        {
-            Kind = XivChatType.FreeCompany,
-            SenderName = "Suzuki Hanako",
-            SenderWorld = "Tonberry",
-            Original = "1ボス行きます、マーカーの位置に散開してください",
-            OriginalLang = Lang.Ja,
-            Status = TranslationStatus.Pending,
-        });
-        ChatLog.Add(new ChatLine
-        {
-            Kind = XivChatType.Ls1,
-            SenderName = "Sato Jiro",
-            SenderWorld = "Ramuh",
-            Original = "今日のレイドは21時からです。遅れる人は連絡ください。",
-            OriginalLang = Lang.Ja,
-            Status = TranslationStatus.Failed,
-            Error = "HTTP 429: rate limited (sample row)",
-        });
-    }
 }

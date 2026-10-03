@@ -1,0 +1,80 @@
+name: Build
+
+on:
+  push:
+    branches: ['**']
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    permissions:
+      contents: write # create the GitHub release on tag pushes
+    env:
+      DOTNET_CLI_TELEMETRY_OPTOUT: 1
+      DOTNET_NOLOGO: 1
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Install .NET
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: 10.0.x
+
+      # Dalamud.NET.Sdk and the test project look here when DALAMUD_HOME is not set.
+      - name: Download Dalamud
+        shell: pwsh
+        run: |
+          Invoke-WebRequest -Uri https://goatcorp.github.io/dalamud-distrib/latest.zip -OutFile latest.zip
+          Expand-Archive -Force latest.zip "$env:APPDATA\XIVLauncher\addon\Hooks\dev\"
+
+      - name: Build
+        run: dotnet build JpEnChat/JpEnChat.csproj -c Release -warnaserror
+
+      - name: Test
+        run: dotnet test JpEnChat.Tests -c Release
+
+      # Single-entry pluginmaster for this build. On a tag it points at that release's zip; otherwise at the newest
+      # release. The committed repo.json at the repo root is what users add; update it from this file when releasing.
+      - name: Generate repo.json
+        shell: pwsh
+        run: |
+          $manifest = Get-Content JpEnChat/bin/Release/JpEnChat/JpEnChat.json -Raw | ConvertFrom-Json
+          $base = "${{ github.server_url }}/${{ github.repository }}/releases"
+          if ("${{ github.ref_type }}" -eq "tag") {
+            $zip = "$base/download/${{ github.ref_name }}/latest.zip"
+          } else {
+            $zip = "$base/latest/download/latest.zip"
+          }
+          $manifest | Add-Member -NotePropertyName DownloadLinkInstall -NotePropertyValue $zip
+          $manifest | Add-Member -NotePropertyName DownloadLinkUpdate -NotePropertyValue $zip
+          $manifest | Add-Member -NotePropertyName DownloadLinkTesting -NotePropertyValue $zip
+          $manifest | Add-Member -NotePropertyName LastUpdate -NotePropertyValue ([DateTimeOffset]::UtcNow.ToUnixTimeSeconds())
+          New-Item -ItemType Directory -Force artifacts | Out-Null
+          ConvertTo-Json -InputObject @($manifest) -Depth 5 | Set-Content -Encoding utf8NoBOM artifacts/repo.json
+          Get-Content artifacts/repo.json
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: JpEnChat
+          path: |
+            JpEnChat/bin/Release/JpEnChat/latest.zip
+            JpEnChat/bin/Release/JpEnChat/JpEnChat.json
+            artifacts/repo.json
+          if-no-files-found: error
+
+      - name: Create release
+        if: github.ref_type == 'tag'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            JpEnChat/bin/Release/JpEnChat/latest.zip
+            artifacts/repo.json
+          fail_on_unmatched_files: true
