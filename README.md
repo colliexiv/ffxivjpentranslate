@@ -190,7 +190,7 @@ dotnet test JpEnChat.Tests -c Release
 
 The output goes to `JpEnChat/bin/Release/`. That folder holds `JpEnChat.dll` and `JpEnChat.json`, and a packaged `JpEnChat/latest.zip`. The tests run on Windows and Linux.
 
-CI (`.github/workflows/build.yml`) builds and tests every push. Pushing a `v*` tag also creates a GitHub release with `latest.zip`, which the committed `repo.json` picks up through the `releases/latest` link. Bump `<Version>` in `JpEnChat/JpEnChat.csproj` and the `AssemblyVersion`/`LastUpdate` in `repo.json` when tagging (CI produces an up-to-date `repo.json` as a build artifact).
+CI (`.github/workflows/build.yml`) builds and tests every push. Pushing a `v*` or `N.N.N` tag also creates a GitHub release with `latest.zip`, which the committed `repo.json` picks up through the `releases/latest` link. Bump `<Version>` in `JpEnChat/JpEnChat.csproj` and the `AssemblyVersion`/`LastUpdate` in `repo.json` when tagging (CI produces an up-to-date `repo.json` as a build artifact).
 
 ## Loading as a dev plugin
 
