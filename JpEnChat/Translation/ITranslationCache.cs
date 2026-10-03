@@ -48,6 +48,12 @@ public interface ITranslationCache
 
     /// <summary>Writes entries to disk atomically (temp file + replace).</summary>
     void Save();
+
+    /// <summary>
+    /// Writes entries only if they changed since the last load/save. Called by the pipeline on a timer and on
+    /// dispose, so implementations should make the clean case cheap. The default just calls <see cref="Save"/>.
+    /// </summary>
+    void SaveIfDirty() => Save();
 }
 
 /// <summary>Convenience overloads over <see cref="ITranslationCache"/>.</summary>
