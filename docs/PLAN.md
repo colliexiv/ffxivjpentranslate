@@ -373,6 +373,7 @@ Framework.RunOnFrameworkThread(() => Send("/p " + ja));
 | M3 | Normalized exact cache, per-sender debounce/batching | macros translated as a unit, repeats instant | done (Phase 2A) |
 | M4 | Outgoing: EN input → structured JA + breakdown → confirm → `ProcessChatBoxEntry` | can chat in JP | done (Phases 2A, 2B, 3) |
 | M5 | Polish: channel colors, tabs/filters, byte counter, politeness toggle, `repo.json` release | installable from custom repo | done (Phases 2B, 3) |
+| P4 | Vanilla chat integration: translate English typed into the game's chat box in a popup; chat-bar button | | done (Phase 4, §9) |
 | v2 | Hide vanilla chat, backfill history from `RaptureLogModule`, optional LLM gate for ambiguous bursts, glossary editor | | open |
 
 "Done" means implemented, building with zero warnings and unit-tested; in-game verification is still pending (README,
@@ -425,3 +426,72 @@ Framework.RunOnFrameworkThread(() => Send("/p " + ja));
   translator. EN lines are shown as-is with an empty right cell.
 - **Own messages**: skipped on ingest except TellOutgoing; sent messages are
   added to the log by the send path instead.
+
+---
+
+## 9. Phase 4: vanilla chat integration
+
+Goal: the user keeps typing in the game's own chat box. Plain English is translated before it is sent, without opening
+the plugin window. Version 0.2.0.0.
+
+### 9.1 Hook
+
+- `Chat/ChatSendHook` hooks `UIModule.ProcessChatBoxEntry` through `IGameInteropProvider.HookFromAddress`. Native
+  signature per ClientStructs' `[MemberFunction]`: `void (UIModule* this, Utf8String* message, nint a4, bool
+  saveToHistory)`. The managed delegate is `void (UIModule*, Utf8String*, nint, byte)`; `byte` for the bool so
+  marshalling reads one byte. Address: `UIModule.Addresses.ProcessChatBoxEntry.Value` (ClientStructs resolves it from
+  the signature `48 89 5C 24 ?? 48 89 74 24 ?? 57 48 83 EC 20 48 8B F2 48 8B F9 45 84 C9` at startup).
+- Detour (framework thread): read `message->ToString()`, decide with the pure `InterceptDecision.Decide(text,
+  enabled, bypassPrefix, modifierHeld)`:
+  1. disabled → pass; 2. bypass modifier held (`IKeyState`, Ctrl by default) → pass; 3. empty or control characters
+  (item links, auto-translate payload bytes) → pass; 4. bypass prefix (`\`) at the start or right after a channel
+  command → call the original with the prefix stripped (new `Utf8String`, disposed after); 5. a leading `/` that is
+  not a chat-channel command (`OutgoingChannels.TrySplitChatCommand`; `/e` counts as not) → pass; 6. body empty, only
+  links/numbers/symbols, or containing Japanese → pass; 7. else intercept.
+- Intercept: the original is **not** called (the chat box has already cleared its input). `OnIntercept` (the popup)
+  gets the prefix exactly as typed, the body, the raw line, and the channel (typed command, else
+  `RaptureShellModule.ChatType`/`TellName`/`TellWorld`). The body is logged only at Debug.
+
+Safety rules:
+
+- **Bypass flag.** Every plugin send goes through `ChatSendHook.SendBypassingHook`, which sets a flag around
+  `GameChatSender.Send`; the detour passes straight to the original while it is set. The plugin can never intercept
+  its own line.
+- **Fail open.** Any exception while deciding or handing over, a missing handler, or a handler that declines (the
+  popup is mid-send) calls the original with the unchanged message. Exceptions are logged once per type. A bug can
+  delay nothing and eat nothing.
+- **Pass by default.** Only plainly English chat is held. Commands, emotes, echo, Japanese, links, numbers and payloads
+  go through untouched.
+- **No install, no feature.** A null address or an exception while hooking logs a warning; the rest of the plugin
+  works. `Dispose` disables and disposes the hook, before the popup and the translation pipeline.
+
+### 9.2 Popup
+
+- `Ui/QuickTranslatePopup`: plain `ImGui.Begin` window (no title bar, auto-resize, no saved settings, no focus on
+  appearing), not a Dalamud `Window`, so it is not in the window list and Esc is fully ours.
+- The outgoing state machine was extracted from `OutgoingComposer` into `Ui/OutgoingSession` (states, generation
+  counter, cancellation, send, events) and the breakdown panel into `Ui/OutgoingPanel`. The main window's composer and
+  the popup each own one session + panel; the composer's behaviour is unchanged.
+- Placement: right of the `ChatLog` addon, bottom-aligned (`X + width + 8·scale`, `Y + height − popupHeight`); above
+  it if that leaves the main viewport; then `PopupOffsetX/Y`; clamped into the viewport. Addon coordinates are
+  relative to the game window, so `MainViewport.Pos` is added.
+- Keys: Enter/Ctrl+Enter in the JA box sends prefix + Japanese (the Japanese alone without a prefix, so the chat box's
+  channel applies); Shift+Enter or "Send English" sends the raw line through the bypass; Esc cancels and puts the raw
+  line back with `AddonChatLog.TextInput->SetText` (clipboard + a 2 s notice if that is impossible). Popup keys are
+  read when the popup is focused with no active item, or when no ImGui text input is active.
+- Sent lines are added to the log (`IsSentByPlugin`). `RecentSends` also matches an echo equal to the whole command,
+  so a prefix-less send to a tell channel is not logged twice.
+
+### 9.3 Chat-bar button
+
+`Ui/ChatBarButton`: a borderless, background-less, auto-sized ImGui window with one icon button, positioned at the
+right end of the last chat tab (`AddonChatLog.ChatTabs[TabCount−1]->OwnerNode` screen rect; the addon's top-left if no
+tab is found) plus `ChatBarButtonOffsetX/Y`. Hidden when the addon is missing or hidden, the game UI is hidden, or
+`ShowChatBarButton` is off. It toggles the main window.
+
+### 9.4 Config
+
+`InterceptVanillaChat` (true), `BypassPrefix` (`\`, 1–3 characters, not starting with `/`, normalized on load and
+on edit), `BypassModifier` (Ctrl/Shift/Alt/None, default Ctrl), `PopupOffsetX/Y` (0), `ShowChatBarButton` (true),
+`ChatBarButtonOffsetX/Y` (4, 0). Schema version stays 1 (additive fields). `/jpchat auto` toggles
+`InterceptVanillaChat` and prints the state with `IChatGui.Print`, the plugin's only chat print.

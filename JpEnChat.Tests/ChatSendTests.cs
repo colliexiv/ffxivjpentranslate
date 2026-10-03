@@ -84,4 +84,15 @@ public class ChatSendTests
         Assert.False(sends.TryConsumeEcho("m0", now));
         Assert.True(sends.TryConsumeEcho($"m{RecentSends.Capacity + 2}", now));
     }
+
+    [Fact]
+    public void RecentSendsMatchesALineSentWithoutPrefix()
+    {
+        // The popup sends the Japanese alone when the chat box's selected channel is a tell.
+        var sends = new RecentSends();
+        var now = new DateTime(2026, 10, 3, 12, 0, 0, DateTimeKind.Utc);
+        sends.Add("よろしく", now);
+        Assert.True(sends.TryConsumeEcho("よろしく", now));
+        Assert.False(sends.TryConsumeEcho("よろしく", now));
+    }
 }

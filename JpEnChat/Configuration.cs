@@ -8,6 +8,15 @@ using Newtonsoft.Json;
 
 namespace JpEnChat;
 
+/// <summary>Modifier key that, held while pressing Enter in the game's chat box, sends the line untranslated.</summary>
+public enum BypassModifier
+{
+    Ctrl,
+    Shift,
+    Alt,
+    None,
+}
+
 /// <summary>
 /// Persisted plugin settings. Saved by Dalamud as JSON under <c>pluginConfigs/JpEnChat.json</c>.
 /// </summary>
@@ -85,6 +94,37 @@ public sealed class Configuration : IPluginConfiguration
     /// <summary>Reserved for v2 (hide the vanilla ChatLog addon). Unused in v1.</summary>
     public bool HideVanillaChat { get; set; }
 
+    // ---- Vanilla chat integration (PLAN §9) ----
+
+    /// <summary>Plain English typed into the game's chat box is translated in a popup before it is sent.</summary>
+    public bool InterceptVanillaChat { get; set; } = true;
+
+    /// <summary>Lines starting with this are sent untranslated, with the prefix removed. 1–3 characters.</summary>
+    public string BypassPrefix { get; set; } = DefaultBypassPrefix;
+
+    /// <summary>Holding this key while pressing Enter in the game's chat box sends the line untranslated.</summary>
+    public BypassModifier BypassModifier { get; set; } = BypassModifier.Ctrl;
+
+    /// <summary>Added to the quick-translate popup's position next to the chat box, in pixels (before UI scale).</summary>
+    public int PopupOffsetX { get; set; }
+
+    /// <inheritdoc cref="PopupOffsetX"/>
+    public int PopupOffsetY { get; set; }
+
+    /// <summary>Show the small button on the game's chat tab bar that toggles the main window.</summary>
+    public bool ShowChatBarButton { get; set; } = true;
+
+    /// <summary>Offset of the chat-bar button from its anchor (right end of the last chat tab), in pixels (before UI scale).</summary>
+    public int ChatBarButtonOffsetX { get; set; } = DefaultChatBarButtonOffsetX;
+
+    /// <inheritdoc cref="ChatBarButtonOffsetX"/>
+    public int ChatBarButtonOffsetY { get; set; } = DefaultChatBarButtonOffsetY;
+
+    public const string DefaultBypassPrefix = "\\";
+    public const int MaxBypassPrefixLength = 3;
+    public const int DefaultChatBarButtonOffsetX = 4;
+    public const int DefaultChatBarButtonOffsetY = 0;
+
     // ---- Secrets (PLAN §5) ----
 
     /// <summary>DPAPI-protected, base64 OpenRouter API key. Use <see cref="OpenRouterKey"/> instead.</summary>
@@ -151,11 +191,28 @@ public sealed class Configuration : IPluginConfiguration
     public void Migrate()
     {
         // No older schemas exist yet. Future: if (Version < 2) { ...; Version = 2; }
+        // Fields added later in schema 1 load as their defaults; only values a hand-edit could break are repaired.
+        BypassPrefix = NormalizeBypassPrefix(BypassPrefix);
+        if (!Enum.IsDefined(BypassModifier))
+        {
+            BypassModifier = BypassModifier.Ctrl;
+        }
+
         Version = CurrentVersion;
     }
 
     /// <summary>Persists this configuration via Dalamud.</summary>
     public void Save() => Services.PluginInterface.SavePluginConfig(this);
+
+    /// <summary>
+    /// A usable bypass prefix: trimmed, 1–<see cref="MaxBypassPrefixLength"/> characters, must not start with
+    /// <c>/</c> (that would swallow chat commands). Anything else falls back to <see cref="DefaultBypassPrefix"/>.
+    /// </summary>
+    public static string NormalizeBypassPrefix(string? value)
+    {
+        var trimmed = value?.Trim() ?? string.Empty;
+        return trimmed.Length is >= 1 and <= MaxBypassPrefixLength && trimmed[0] != '/' ? trimmed : DefaultBypassPrefix;
+    }
 
     private static string ProtectOrEmpty(string? value) =>
         string.IsNullOrEmpty(value) ? string.Empty : ProtectedSecret.Protect(value);

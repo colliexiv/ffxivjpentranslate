@@ -7,8 +7,6 @@ using Dalamud.Game.Text;
 using Dalamud.Interface;
 using Dalamud.Interface.Colors;
 using Dalamud.Interface.Components;
-using Dalamud.Interface.GameFonts;
-using Dalamud.Interface.ManagedFontAtlas;
 using Dalamud.Interface.Utility;
 using Dalamud.Interface.Utility.Raii;
 using Dalamud.Interface.Windowing;
@@ -39,8 +37,7 @@ public sealed class MainWindow : Window, IDisposable
     private readonly ChatLogView logView;
     private readonly OutgoingComposer composer;
 
-    private IFontHandle? fontHandle;
-    private float fontSizeBuilt;
+    private readonly AxisFont font;
 
     /// <param name="configuration">Shared settings; read every frame (font size, timestamps, filter).</param>
     /// <param name="log">Row store; the window reads it and the send path appends to it.</param>
@@ -72,6 +69,7 @@ public sealed class MainWindow : Window, IDisposable
         hiddenChannels = [.. configuration.HiddenLogChannels];
         logView = new ChatLogView(log, configuration, hiddenChannels, currentWorld, retry);
         composer = new OutgoingComposer(configuration, log, translator, send, localPlayerName);
+        font = new AxisFont(configuration);
 
         RespectCloseHotkey = false;
         Size = new Vector2(640, 420);
@@ -86,8 +84,7 @@ public sealed class MainWindow : Window, IDisposable
     public void Dispose()
     {
         composer.Dispose();
-        fontHandle?.Dispose();
-        fontHandle = null;
+        font.Dispose();
     }
 
     public override void OnOpen()
@@ -99,7 +96,10 @@ public sealed class MainWindow : Window, IDisposable
 
     public override void Draw()
     {
-        EnsureFont();
+        if (font.Ensure())
+        {
+            logView.InvalidateLayout();
+        }
 
         if (configuration.OpenRouterKeyProtected.Length == 0)
         {
@@ -108,7 +108,7 @@ public sealed class MainWindow : Window, IDisposable
 
         DrawToolbar();
 
-        using (fontHandle is { Available: true } handle ? handle.Push() : null)
+        using (font.Push())
         {
             var reserved = composer.ReservedPanelHeight() + OutgoingComposer.InputRowHeight();
             var logHeight = Math.Max(ImGui.GetContentRegionAvail().Y - reserved, 40f * ImGuiHelpers.GlobalScale);
@@ -119,22 +119,6 @@ public sealed class MainWindow : Window, IDisposable
         }
 
         composer.EndFrame(ImGui.IsWindowFocused(ImGuiFocusedFlags.RootAndChildWindows));
-    }
-
-    /// <summary>(Re)creates the Axis font handle when the configured size changes.</summary>
-    private void EnsureFont()
-    {
-        var size = Math.Clamp(configuration.FontSizePx, 10f, 24f);
-        if (fontHandle != null && Math.Abs(size - fontSizeBuilt) < 0.01f)
-        {
-            return;
-        }
-
-        fontHandle?.Dispose();
-        fontHandle = Services.PluginInterface.UiBuilder.FontAtlas.NewGameFontHandle(
-            new GameFontStyle(GameFontFamily.Axis, size));
-        fontSizeBuilt = size;
-        logView.InvalidateLayout();
     }
 
     private void DrawToolbar()

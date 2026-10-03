@@ -195,7 +195,8 @@ public sealed class RecentSends
 
     /// <summary>
     /// True (and forgets the entry) when a remembered command ends with <paramref name="echoText"/>, i.e. the echo is
-    /// the body of a command such as <c>/t Name@World body</c>.
+    /// the body of a command such as <c>/t Name@World body</c>, or equals it (a line sent without a prefix while the
+    /// chat box's selected channel is a tell).
     /// </summary>
     public bool TryConsumeEcho(string echoText, DateTime nowUtc)
     {
@@ -209,7 +210,8 @@ public sealed class RecentSends
         for (var i = 0; i < entries.Count; i++)
         {
             var command = SeStringText.CollapseWhitespace(entries[i].Command);
-            if (command.EndsWith(" " + echoText, StringComparison.Ordinal))
+            if (command.EndsWith(" " + echoText, StringComparison.Ordinal)
+                || string.Equals(command, echoText, StringComparison.Ordinal))
             {
                 entries.RemoveAt(i);
                 return true;

@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <Project Sdk="Dalamud.NET.Sdk/15.0.0">
   <PropertyGroup>
-    <Version>0.1.0.0</Version>
+    <Version>0.2.0.0</Version>
     <AssemblyName>JpEnChat</AssemblyName>
     <RootNamespace>JpEnChat</RootNamespace>
     <Nullable>enable</Nullable>
@@ -18,6 +18,11 @@ Translation uses your own OpenRouter API key (chat lines in the channels you ena
     <RepoUrl>https://github.com/colliexiv/ffxivjpentranslate</RepoUrl>
     <Tags>chat;translation;japanese;english</Tags>
   </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Unit tests drive internal UI state machines (OutgoingSession) and parsers (OutgoingChannels). -->
+    <InternalsVisibleTo Include="JpEnChat.Tests" />
+  </ItemGroup>
 
   <ItemGroup>
     <!-- DPAPI for API key storage. Not part of the base shared framework reference pack. -->

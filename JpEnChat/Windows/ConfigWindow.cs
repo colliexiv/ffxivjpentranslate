@@ -15,7 +15,7 @@ using JpEnChat.Ui;
 namespace JpEnChat.Windows;
 
 /// <summary>
-/// Settings window: General, Translation, Channels, Cache and Keys tabs (PLAN §5).
+/// Settings window: General, Translation, Vanilla chat, Channels, Cache and Keys tabs (PLAN §5, §9).
 /// </summary>
 /// <remarks>
 /// Toggles and combos save immediately. Sliders apply live (so the font size previews while dragging) and save when
@@ -44,6 +44,11 @@ public sealed class ConfigWindow : Window, IDisposable
     private readonly Configuration configuration;
     private readonly Action clearCache;
     private readonly Func<int> cacheEntryCount;
+    private readonly Func<bool> chatHookInstalled;
+
+    private static readonly string[] ModifierLabels = ["Ctrl", "Shift", "Alt", "None"];
+    private static readonly BypassModifier[] ModifierValues =
+        [BypassModifier.Ctrl, BypassModifier.Shift, BypassModifier.Alt, BypassModifier.None];
 
     private string modelBuffer = string.Empty;
     private string outgoingModelBuffer = string.Empty;
@@ -52,6 +57,7 @@ public sealed class ConfigWindow : Window, IDisposable
     private int maxCacheEntriesBuffer;
     private List<XivChatType> channelChoices = [];
     private string cacheStatus = string.Empty;
+    private string bypassPrefixBuffer = string.Empty;
 
     // Plaintext lives only while the window is open; decrypted on open, wiped on close.
     private readonly KeyEditor primaryKey;
@@ -60,12 +66,14 @@ public sealed class ConfigWindow : Window, IDisposable
     /// <param name="configuration">Settings to edit; saved via <see cref="Configuration.Save"/>.</param>
     /// <param name="clearCache">Clears the translation cache (Cache tab button).</param>
     /// <param name="cacheEntryCount">Current number of cache entries, shown on the Cache tab.</param>
-    public ConfigWindow(Configuration configuration, Action clearCache, Func<int> cacheEntryCount)
+    /// <param name="chatHookInstalled">Whether the chat-box hook is installed (shown on the Vanilla chat tab).</param>
+    public ConfigWindow(Configuration configuration, Action clearCache, Func<int> cacheEntryCount, Func<bool> chatHookInstalled)
         : base("JP/EN Chat Settings###JpEnChatConfig", ImGuiWindowFlags.NoCollapse)
     {
         this.configuration = configuration;
         this.clearCache = clearCache;
         this.cacheEntryCount = cacheEntryCount;
+        this.chatHookInstalled = chatHookInstalled;
 
         primaryKey = new KeyEditor(
             "OpenRouter API key",
@@ -107,6 +115,7 @@ public sealed class ConfigWindow : Window, IDisposable
             .Distinct()
             .ToList();
         cacheStatus = string.Empty;
+        bypassPrefixBuffer = configuration.BypassPrefix;
         primaryKey.Load();
         secondaryKey.Load();
     }
@@ -128,6 +137,7 @@ public sealed class ConfigWindow : Window, IDisposable
 
         DrawTab("General", DrawGeneral);
         DrawTab("Translation", DrawTranslation);
+        DrawTab("Vanilla chat", DrawVanillaChat);
         DrawTab("Channels", DrawChannels);
         DrawTab("Cache", DrawCache);
         DrawTab("Keys", DrawKeys);
@@ -312,6 +322,117 @@ public sealed class ConfigWindow : Window, IDisposable
                 apply(preset);
                 Commit();
             }
+        }
+    }
+
+    // ---- Vanilla chat (PLAN §9) ----
+
+    private void DrawVanillaChat()
+    {
+        ImGui.TextWrapped(
+            "When on, plain English you type into the game's own chat box is held back when you press Enter and "
+            + "translated in a small popup next to the chat box. Press Enter in the popup to send the Japanese, "
+            + "Shift+Enter to send your English as typed, Esc to cancel (your text is put back into the chat box).");
+        ImGui.Spacing();
+
+        if (!chatHookInstalled())
+        {
+            ImGui.TextColored(ImGuiColors.DalamudRed, "Unavailable this session: the chat-box hook could not be installed (see /xllog).");
+        }
+
+        var intercept = configuration.InterceptVanillaChat;
+        if (ImGui.Checkbox("Translate English typed into the game's chat box", ref intercept))
+        {
+            configuration.InterceptVanillaChat = intercept;
+            Commit();
+        }
+
+        ImGuiComponents.HelpMarker(
+            "Only lines that are plain English are held back. Japanese, commands such as /dance or /xlplugins, /e echo, "
+            + "links, numbers and item links are always sent unchanged. Toggle quickly with /jpchat auto.");
+
+        var modifierIndex = Math.Max(Array.IndexOf(ModifierValues, configuration.BypassModifier), 0);
+        ImGui.SetNextItemWidth(ImGui.GetFontSize() * 6f);
+        using (var combo = ImRaii.Combo("Send untranslated with modifier + Enter", ModifierLabels[modifierIndex]))
+        {
+            if (combo.Success)
+            {
+                for (var i = 0; i < ModifierValues.Length; i++)
+                {
+                    if (ImGui.Selectable(ModifierLabels[i], i == modifierIndex))
+                    {
+                        configuration.BypassModifier = ModifierValues[i];
+                        Commit();
+                    }
+                }
+            }
+        }
+
+        ImGuiComponents.HelpMarker("Hold this key while pressing Enter in the game's chat box to send English to English-speaking friends as typed. Default Ctrl (Ctrl+Enter).");
+
+        ImGui.SetNextItemWidth(ImGui.GetFontSize() * 4f);
+        ImGui.InputText("Bypass prefix", ref bypassPrefixBuffer, Configuration.MaxBypassPrefixLength * 4);
+        if (ImGui.IsItemDeactivatedAfterEdit())
+        {
+            configuration.BypassPrefix = Configuration.NormalizeBypassPrefix(bypassPrefixBuffer);
+            bypassPrefixBuffer = configuration.BypassPrefix;
+            Commit();
+        }
+
+        ImGuiComponents.HelpMarker(
+            $"A line starting with this is sent untranslated, without the prefix: \"{configuration.BypassPrefix}hello\" sends \"hello\". "
+            + "Also works after a channel command (\"/p " + configuration.BypassPrefix + "hello\"). 1–3 characters, not starting with /.");
+
+        ImGui.Separator();
+        ImGui.TextUnformatted("Popup position");
+        ImGui.TextDisabled("Placed right of the chat box (above it if there is no room), then moved by these offsets.");
+        DrawOffsetPair("##popupOffset", () => configuration.PopupOffsetX, v => configuration.PopupOffsetX = v,
+            () => configuration.PopupOffsetY, v => configuration.PopupOffsetY = v, 0, 0);
+
+        ImGui.Separator();
+        var showButton = configuration.ShowChatBarButton;
+        if (ImGui.Checkbox("Show the log button on the chat tab bar", ref showButton))
+        {
+            configuration.ShowChatBarButton = showButton;
+            Commit();
+        }
+
+        ImGuiComponents.HelpMarker("A small button next to the game's chat tabs that opens or closes the JP/EN chat window.");
+        ImGui.TextDisabled("Placed right of the last chat tab, then moved by these offsets.");
+        DrawOffsetPair("##buttonOffset", () => configuration.ChatBarButtonOffsetX, v => configuration.ChatBarButtonOffsetX = v,
+            () => configuration.ChatBarButtonOffsetY, v => configuration.ChatBarButtonOffsetY = v,
+            Configuration.DefaultChatBarButtonOffsetX, Configuration.DefaultChatBarButtonOffsetY);
+    }
+
+    /// <summary>X and Y sliders (-400..400 px) plus a Reset button. Sliders apply live and save on release.</summary>
+    private void DrawOffsetPair(
+        string id, Func<int> getX, Action<int> setX, Func<int> getY, Action<int> setY, int defaultX, int defaultY)
+    {
+        using var scope = ImRaii.PushId(id);
+        var x = getX();
+        ImGui.SetNextItemWidth(ImGui.GetFontSize() * 12f);
+        if (ImGui.SliderInt("Offset X", ref x, -400, 400, "%d px"))
+        {
+            setX(x);
+        }
+
+        CommitIfReleased();
+
+        var y = getY();
+        ImGui.SetNextItemWidth(ImGui.GetFontSize() * 12f);
+        if (ImGui.SliderInt("Offset Y", ref y, -400, 400, "%d px"))
+        {
+            setY(y);
+        }
+
+        CommitIfReleased();
+
+        ImGui.SameLine();
+        if (ImGui.Button("Reset"))
+        {
+            setX(defaultX);
+            setY(defaultY);
+            Commit();
         }
     }
 

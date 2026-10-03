@@ -25,7 +25,9 @@ public sealed class Plugin : IDalamudPlugin
     private readonly LruTranslationCache cache;
     private readonly OpenRouterClient client;
     private readonly TranslationPipeline pipeline;
-    private readonly IChatSender chatSender;
+    private readonly ChatSendHook chatSendHook;
+    private readonly QuickTranslatePopup quickPopup;
+    private readonly ChatBarButton chatBarButton;
     private readonly ChatIngest ingest;
 
     private uint cachedWorldId = uint.MaxValue;
@@ -59,34 +61,42 @@ public sealed class Plugin : IDalamudPlugin
             action => Services.Framework.RunOnFrameworkThread(action),
             log);
 
-        // Game I/O (PLAN §3.1, §4.1 step 4).
-        chatSender = new GameChatSender(log);
+        // Game I/O (PLAN §3.1, §4.1 step 4). Every plugin send goes through the hook's bypass (PLAN §9).
+        var chatSender = new GameChatSender(log);
+        chatSendHook = new ChatSendHook(Configuration, chatSender, log);
 
-        configWindow = new ConfigWindow(Configuration, cache.Clear, () => cache.Count);
+        var outgoingTranslator = new PipelineOutgoingTranslator(pipeline);
+        configWindow = new ConfigWindow(Configuration, cache.Clear, () => cache.Count, () => chatSendHook.IsInstalled);
         mainWindow = new MainWindow(
             Configuration,
             ChatLog,
-            new PipelineOutgoingTranslator(pipeline),
+            outgoingTranslator,
             SendChat,
             pipeline.Retry,
             CurrentWorldName,
             LocalPlayerName,
             OpenConfig);
 
+        // Vanilla chat integration (PLAN §9): popup for lines typed into the game's chat box, and the chat-bar button.
+        quickPopup = new QuickTranslatePopup(Configuration, ChatLog, outgoingTranslator, SendChat, LocalPlayerName);
+        chatBarButton = new ChatBarButton(Configuration, ToggleMainUi);
+
         windowSystem.AddWindow(mainWindow);
         windowSystem.AddWindow(configWindow);
 
         Services.CommandManager.AddHandler(CommandName, new CommandInfo(OnCommand)
         {
-            HelpMessage = "Toggle the JP/EN chat window. \"/jpchat config\" opens settings.",
+            HelpMessage = "Toggle the JP/EN chat window. \"/jpchat config\" opens settings. "
+                + "\"/jpchat auto\" toggles translating English typed into the game's chat box.",
         });
 
-        pluginInterface.UiBuilder.Draw += windowSystem.Draw;
+        pluginInterface.UiBuilder.Draw += OnDraw;
         pluginInterface.UiBuilder.OpenMainUi += ToggleMainUi;
         pluginInterface.UiBuilder.OpenConfigUi += ToggleConfigUi;
 
         // Subscribe last, so no chat line arrives before everything it touches exists.
         ingest = new ChatIngest(Configuration, ChatLog, pipeline, log);
+        chatSendHook.OnIntercept = quickPopup.TryBegin;
     }
 
     public Configuration Configuration { get; }
@@ -96,10 +106,13 @@ public sealed class Plugin : IDalamudPlugin
 
     public void Dispose()
     {
-        // Stop new lines first, then the UI, then cancel in-flight translations (the pipeline saves the cache).
+        // Stop new lines first (ingest, then the chat-box hook so nothing more is intercepted), then the popup and the
+        // UI, then cancel in-flight translations (the pipeline saves the cache).
         ingest.Dispose();
+        chatSendHook.Dispose();
+        quickPopup.Dispose();
 
-        pluginInterface.UiBuilder.Draw -= windowSystem.Draw;
+        pluginInterface.UiBuilder.Draw -= OnDraw;
         pluginInterface.UiBuilder.OpenMainUi -= ToggleMainUi;
         pluginInterface.UiBuilder.OpenConfigUi -= ToggleConfigUi;
 
@@ -122,7 +135,24 @@ public sealed class Plugin : IDalamudPlugin
             return;
         }
 
+        if (sub.Equals("auto", StringComparison.OrdinalIgnoreCase))
+        {
+            Configuration.InterceptVanillaChat = !Configuration.InterceptVanillaChat;
+            Configuration.Save();
+            var state = Configuration.InterceptVanillaChat ? "on" : "off";
+            var note = chatSendHook.IsInstalled ? string.Empty : " (unavailable: the chat-box hook could not be installed; see /xllog)";
+            Services.ChatGui.Print($"[JP/EN Chat] Translating English typed into the chat box: {state}{note}.");
+            return;
+        }
+
         mainWindow.Toggle();
+    }
+
+    private void OnDraw()
+    {
+        windowSystem.Draw();
+        chatBarButton.Draw();
+        quickPopup.Draw();
     }
 
     private void ToggleMainUi() => mainWindow.Toggle();
@@ -157,13 +187,14 @@ public sealed class Plugin : IDalamudPlugin
         Services.PlayerState.IsLoaded ? Services.PlayerState.CharacterName : string.Empty;
 
     /// <summary>
-    /// Sends one confirmed chat command on the framework thread. Registers it with ingest first so the game's echo of a
-    /// tell is not logged twice (the composer adds the sent row itself).
+    /// Sends one confirmed chat command on the framework thread, bypassing the chat-box hook so the plugin's own line is
+    /// never intercepted. Registers it with ingest first so the game's echo of a tell is not logged twice (the
+    /// composer and the popup add the sent row themselves).
     /// </summary>
     private Task SendChat(string command) =>
         Services.Framework.RunOnFrameworkThread(() =>
         {
             ingest.ExpectOwnEcho(command);
-            chatSender.Send(command);
+            chatSendHook.SendBypassingHook(command);
         });
 }
