@@ -1,171 +1,266 @@
 using System;
 using System.Collections.Generic;
-using System.Globalization;
 using System.Numerics;
+using System.Threading.Tasks;
 using Dalamud.Bindings.ImGui;
 using Dalamud.Game.Text;
+using Dalamud.Interface;
 using Dalamud.Interface.Colors;
+using Dalamud.Interface.Components;
+using Dalamud.Interface.GameFonts;
+using Dalamud.Interface.ManagedFontAtlas;
+using Dalamud.Interface.Utility;
 using Dalamud.Interface.Utility.Raii;
 using Dalamud.Interface.Windowing;
 using JpEnChat.Models;
+using JpEnChat.Ui;
 
 namespace JpEnChat.Windows;
 
 /// <summary>
-/// Two-pane chat window: original on the left, translation on the right, input pinned to the bottom (PLAN §4).
+/// Two-pane chat window (PLAN §4). Top to bottom: optional no-key hint, toolbar, log, breakdown panel, input row.
 /// </summary>
 /// <remarks>
-/// Phase 1 placeholder: renders a few fake rows and an input box that only echoes locally.
-/// TODO(Phase 2B): replace <see cref="lines"/> with the shared chat log store fed by ingest, add per-channel colors,
-/// channel filter, auto-scroll, "⚠ retry" cells, hover tooltips, game-font handle at <see cref="Configuration.FontSizePx"/>,
-/// and the outgoing breakdown panel driven by <see cref="OutgoingState"/>.
+/// The log child's height is whatever is left after reserving the panel (last frame's measured height) and the input
+/// row, so the panel pushes the log up instead of covering it. The log, panel and input use the game's Axis font at
+/// <see cref="Configuration.FontSizePx"/>; the toolbar keeps Dalamud's default font so icon buttons line up.
+/// Esc never closes this window (<see cref="Window.RespectCloseHotkey"/> is off); it drives the outgoing flow instead.
 /// </remarks>
 public sealed class MainWindow : Window, IDisposable
 {
-    private const int InputMaxBytes = 500;
+    private const string FilterPopupId = "##jpenChannelFilter";
+
+    private static readonly string CogIcon = FontAwesomeIcon.Cog.ToIconString();
 
     private readonly Configuration configuration;
-    private readonly List<ChatLine> lines;
-    private string input = string.Empty;
+    private readonly ChatLog log;
+    private readonly Action openConfig;
+    private readonly HashSet<XivChatType> hiddenChannels;
+    private readonly ChatLogView logView;
+    private readonly OutgoingComposer composer;
 
-    public MainWindow(Configuration configuration)
+    private IFontHandle? fontHandle;
+    private float fontSizeBuilt;
+
+    /// <param name="configuration">Shared settings; read every frame (font size, timestamps, filter).</param>
+    /// <param name="log">Row store; the window reads it and the send path appends to it.</param>
+    /// <param name="translator">EN→JA structured translation for the outgoing flow.</param>
+    /// <param name="send">
+    /// Sends one full chat command (prefix + Japanese). Must perform the game call on the framework thread
+    /// (e.g. <c>text =&gt; framework.RunOnFrameworkThread(() =&gt; chatSender.Send(text))</c>). A faulted task's
+    /// message is shown in the panel.
+    /// </param>
+    /// <param name="retry">Invoked when the user clicks "retry" on a failed row (on the draw thread).</param>
+    /// <param name="currentWorld">Local player's current world name; the sender's world is shown only when it differs.</param>
+    /// <param name="localPlayerName">Local player name for rows the plugin sent; empty when unknown.</param>
+    /// <param name="openConfig">Opens the settings window.</param>
+    public MainWindow(
+        Configuration configuration,
+        ChatLog log,
+        IOutgoingTranslator translator,
+        Func<string, Task> send,
+        Action<ChatLine> retry,
+        Func<string> currentWorld,
+        Func<string> localPlayerName,
+        Action openConfig)
         : base("JP/EN Chat###JpEnChatMain", ImGuiWindowFlags.NoScrollbar | ImGuiWindowFlags.NoScrollWithMouse)
     {
         this.configuration = configuration;
+        this.log = log;
+        this.openConfig = openConfig;
 
+        hiddenChannels = [.. configuration.HiddenLogChannels];
+        logView = new ChatLogView(log, configuration, hiddenChannels, currentWorld, retry);
+        composer = new OutgoingComposer(configuration, log, translator, send, localPlayerName);
+
+        RespectCloseHotkey = false;
+        Size = new Vector2(640, 420);
+        SizeCondition = ImGuiCond.FirstUseEver;
         SizeConstraints = new WindowSizeConstraints
         {
-            MinimumSize = new Vector2(420, 240),
+            MinimumSize = new Vector2(420, 260),
             MaximumSize = new Vector2(float.MaxValue, float.MaxValue),
         };
-
-        // Fake rows so the layout can be checked in-game before the pipeline exists.
-        var now = DateTime.Now;
-        lines =
-        [
-            new ChatLine
-            {
-                Timestamp = now.AddSeconds(-20), Kind = XivChatType.Party, SenderName = "Tanaka Taro",
-                SenderWorld = "Gaia", Original = "よろしくお願いします！", OriginalLang = Lang.Ja,
-                Status = TranslationStatus.Done, Translation = "Nice to meet you, looking forward to this!",
-            },
-            new ChatLine
-            {
-                Timestamp = now.AddSeconds(-5), Kind = XivChatType.Party, SenderName = "Suzuki Hanako",
-                SenderWorld = "Gaia", Original = "1ボス行きます", OriginalLang = Lang.Ja,
-                Status = TranslationStatus.Pending,
-            },
-            new ChatLine
-            {
-                Timestamp = now, Kind = XivChatType.Say, SenderName = "Example Player",
-                SenderWorld = "Gaia", Original = "hello!", OriginalLang = Lang.En,
-                Status = TranslationStatus.None,
-            },
-        ];
     }
 
     public void Dispose()
     {
+        composer.Dispose();
+        fontHandle?.Dispose();
+        fontHandle = null;
+    }
+
+    public override void OnOpen()
+    {
+        // Do not grab keyboard focus here: an active input box blocks game keys. Click the input (or press Enter
+        // after a send) to type.
+        logView.RequestScrollToBottom();
     }
 
     public override void Draw()
     {
-        var style = ImGui.GetStyle();
-        var inputBlockHeight = ImGui.GetFrameHeightWithSpacing() + style.ItemSpacing.Y;
+        EnsureFont();
 
-        using (var child = ImRaii.Child("##log", new Vector2(0, -inputBlockHeight), true))
+        if (configuration.OpenRouterKeyProtected.Length == 0)
         {
-            if (child.Success)
-            {
-                DrawLog();
-            }
+            ImGui.TextColored(ImGuiColors.DalamudYellow, "Set your OpenRouter key in /jpchat config");
         }
 
-        DrawInput();
+        DrawToolbar();
+
+        using (fontHandle is { Available: true } handle ? handle.Push() : null)
+        {
+            var reserved = composer.ReservedPanelHeight() + OutgoingComposer.InputRowHeight();
+            var logHeight = Math.Max(ImGui.GetContentRegionAvail().Y - reserved, 40f * ImGuiHelpers.GlobalScale);
+
+            logView.Draw(new Vector2(0f, logHeight));
+            composer.DrawPanel();
+            composer.DrawInputRow();
+        }
+
+        composer.EndFrame(ImGui.IsWindowFocused(ImGuiFocusedFlags.RootAndChildWindows));
     }
 
-    private void DrawLog()
+    /// <summary>(Re)creates the Axis font handle when the configured size changes.</summary>
+    private void EnsureFont()
     {
-        const ImGuiTableFlags flags = ImGuiTableFlags.BordersInnerV | ImGuiTableFlags.SizingStretchSame
-                                      | ImGuiTableFlags.Resizable;
-
-        using var table = ImRaii.Table("##logTable", 2, flags);
-        if (!table.Success)
+        var size = Math.Clamp(configuration.FontSizePx, 10f, 24f);
+        if (fontHandle != null && Math.Abs(size - fontSizeBuilt) < 0.01f)
         {
             return;
         }
 
-        ImGui.TableSetupColumn("Original", ImGuiTableColumnFlags.WidthStretch);
-        ImGui.TableSetupColumn("Translation", ImGuiTableColumnFlags.WidthStretch);
+        fontHandle?.Dispose();
+        fontHandle = Services.PluginInterface.UiBuilder.FontAtlas.NewGameFontHandle(
+            new GameFontStyle(GameFontFamily.Axis, size));
+        fontSizeBuilt = size;
+        logView.InvalidateLayout();
+    }
 
-        foreach (var line in lines)
+    private void DrawToolbar()
+    {
+        var hiddenCount = hiddenChannels.Count;
+        if (hiddenCount == 0 ? ImGui.Button("Channels###jpenChannels") : ImGui.Button($"Channels ({hiddenCount} hidden)###jpenChannels"))
         {
-            using var id = ImRaii.PushId(line.Id.ToString(CultureInfo.InvariantCulture));
-            ImGui.TableNextRow();
+            ImGui.OpenPopup(FilterPopupId);
+        }
 
-            ImGui.TableNextColumn();
-            var prefix = configuration.ShowTimestamps ? $"{line.Timestamp:HH:mm} " : string.Empty;
-            ImGui.TextWrapped($"{prefix}{ChannelTag(line.Kind)} {line.SenderName}: {line.Original}");
+        DrawFilterPopup();
 
-            ImGui.TableNextColumn();
-            switch (line.Status)
+        ImGui.SameLine();
+        if (ImGuiComponents.IconButton("##jpenClear", FontAwesomeIcon.TrashAlt))
+        {
+            log.Clear();
+            logView.InvalidateLayout();
+        }
+
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip("Clear the log");
+        }
+
+        if (!logView.IsAtBottom)
+        {
+            ImGui.SameLine();
+            var unseen = logView.HasUnseenRows;
+            if (ImGuiComponents.IconButtonWithText(FontAwesomeIcon.ArrowDown, unseen ? "New messages" : "Latest"))
             {
-                case TranslationStatus.Pending:
-                    ImGui.TextDisabled("…");
-                    break;
-                case TranslationStatus.Failed:
-                    ImGui.TextColored(ImGuiColors.DalamudRed, $"⚠ {line.Error ?? "failed"}");
-                    break;
-                case TranslationStatus.None:
-                    break;
-                default:
-                    ImGui.TextWrapped(line.Translation);
-                    break;
+                logView.RequestScrollToBottom();
             }
         }
-    }
 
-    private void DrawInput()
-    {
-        ImGui.AlignTextToFramePadding();
-        ImGui.Text("EN>");
         ImGui.SameLine();
-        ImGui.SetNextItemWidth(-1);
-
-        if (ImGui.InputText("##en", ref input, InputMaxBytes, ImGuiInputTextFlags.EnterReturnsTrue)
-            && !string.IsNullOrWhiteSpace(input))
+        var gearWidth = GearButtonWidth();
+        var right = ImGui.GetCursorPosX() + ImGui.GetContentRegionAvail().X - gearWidth;
+        if (right > ImGui.GetCursorPosX())
         {
-            // TODO(Phase 2B/3): hand off to the outgoing flow (ITranslator.TranslateOutgoingAsync → confirm →
-            // IChatSender.Send on the framework thread). Phase 1 only echoes the text as a local row.
-            lines.Add(new ChatLine
-            {
-                Kind = XivChatType.Say,
-                SenderName = "You",
-                Original = input.Trim(),
-                OriginalLang = Lang.En,
-                IsOwn = true,
-                IsSentByPlugin = true,
-            });
-            input = string.Empty;
-            ImGui.SetKeyboardFocusHere(-1);
+            ImGui.SetCursorPosX(right);
+        }
+
+        if (ImGuiComponents.IconButton("##jpenSettings", FontAwesomeIcon.Cog))
+        {
+            openConfig();
+        }
+
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip("Settings");
         }
     }
 
-    private static string ChannelTag(XivChatType kind) => kind switch
+    private void DrawFilterPopup()
     {
-        XivChatType.Say => "[S]",
-        XivChatType.Shout => "[Sh]",
-        XivChatType.Yell => "[Y]",
-        XivChatType.Party or XivChatType.CrossParty => "[P]",
-        XivChatType.Alliance => "[A]",
-        XivChatType.FreeCompany => "[FC]",
-        XivChatType.TellIncoming => "[From]",
-        XivChatType.TellOutgoing => "[To]",
-        XivChatType.NoviceNetwork => "[NN]",
-        >= XivChatType.Ls1 and <= XivChatType.Ls8 => $"[LS{kind - XivChatType.Ls1 + 1}]",
-        XivChatType.CrossLinkShell1 => "[CWLS1]",
-        >= XivChatType.CrossLinkShell2 and <= XivChatType.CrossLinkShell8 =>
-            $"[CWLS{kind - XivChatType.CrossLinkShell2 + 2}]",
-        _ => $"[{kind}]",
-    };
+        using var popup = ImRaii.Popup(FilterPopupId);
+        if (!popup.Success)
+        {
+            return;
+        }
+
+        var changed = false;
+        if (ImGui.Button("All"))
+        {
+            hiddenChannels.Clear();
+            changed = true;
+        }
+
+        ImGui.SameLine();
+        if (ImGui.Button("None"))
+        {
+            foreach (var kind in FilterableChannels())
+            {
+                hiddenChannels.Add(kind);
+            }
+
+            changed = true;
+        }
+
+        ImGui.Separator();
+
+        foreach (var kind in FilterableChannels())
+        {
+            var visible = !hiddenChannels.Contains(kind);
+            using var color = ImRaii.PushColor(ImGuiCol.Text, ChatChannels.Color(kind));
+            if (ImGui.Checkbox(ChatChannels.DisplayName(kind), ref visible))
+            {
+                if (visible)
+                {
+                    hiddenChannels.Remove(kind);
+                }
+                else
+                {
+                    hiddenChannels.Add(kind);
+                }
+
+                changed = true;
+            }
+        }
+
+        if (changed)
+        {
+            configuration.HiddenLogChannels = [.. hiddenChannels];
+            configuration.Save();
+        }
+    }
+
+    /// <summary>Captured channels plus Echo (used by the outgoing "Echo (test)" channel).</summary>
+    private IEnumerable<XivChatType> FilterableChannels()
+    {
+        foreach (var kind in configuration.EnabledChannels)
+        {
+            yield return kind;
+        }
+
+        if (!configuration.EnabledChannels.Contains(XivChatType.Echo))
+        {
+            yield return XivChatType.Echo;
+        }
+    }
+
+    private static float GearButtonWidth()
+    {
+        using (Services.PluginInterface.UiBuilder.IconFontHandle.Push())
+        {
+            return ImGui.CalcTextSize(CogIcon).X + (ImGui.GetStyle().FramePadding.X * 2f);
+        }
+    }
 }

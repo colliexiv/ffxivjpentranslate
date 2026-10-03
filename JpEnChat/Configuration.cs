@@ -44,7 +44,10 @@ public sealed class Configuration : IPluginConfiguration
     [JsonProperty(ObjectCreationHandling = ObjectCreationHandling.Replace)]
     public List<string> FallbackModels { get; set; } = ["google/gemini-3.5-flash-lite"];
 
-    /// <summary>OpenRouter <c>reasoning.effort</c>. "low" is the floor for Gemini 3.7/3.8 Flash ("minimal" is a 400).</summary>
+    /// <summary>
+    /// OpenRouter <c>reasoning.effort</c>: "low", "medium" or "high". "low" is the floor for Gemini 3.7/3.8 Flash
+    /// ("minimal" is a 400). An empty string means "omit the <c>reasoning</c> object" (for models without thinking).
+    /// </summary>
     public string ReasoningEffort { get; set; } = "low";
 
     /// <summary>Model used for the outgoing EN→JA structured request, where quality matters more than latency.</summary>
@@ -71,6 +74,13 @@ public sealed class Configuration : IPluginConfiguration
     public float FontSizePx { get; set; } = 14f;
 
     public bool ShowTimestamps { get; set; } = true;
+
+    /// <summary>Maximum rows kept in the window's log; the oldest rows are dropped first.</summary>
+    public int MaxLogLines { get; set; } = 2000;
+
+    /// <summary>Channels hidden by the main window's channel filter (display only; capture is unaffected).</summary>
+    [JsonProperty(ObjectCreationHandling = ObjectCreationHandling.Replace)]
+    public List<XivChatType> HiddenLogChannels { get; set; } = [];
 
     /// <summary>Reserved for v2 (hide the vanilla ChatLog addon). Unused in v1.</summary>
     public bool HideVanillaChat { get; set; }
