@@ -167,8 +167,9 @@ That is enough for a JA↔EN tool.
 
 ```json
 {
-  "model": "google/gemini-2.5-flash-lite",
-  "models": ["google/gemini-2.5-flash-lite", "openai/gpt-4.1-mini"],
+  "model": "google/gemini-3.8-flash",
+  "models": ["google/gemini-3.8-flash", "google/gemini-3.5-flash-lite"],
+  "reasoning": {"effort": "low", "exclude": true},
   "messages": [
     {"role":"system","content":"<static prompt + glossary>"},
     {"role":"user","content":"1: ...\n2: ...\n3: ..."}
@@ -183,8 +184,20 @@ That is enough for a JA↔EN tool.
   reasoning. Keep the prefix byte-identical so provider prompt caching
   engages once it exceeds ~1k tokens (add a glossary of FFXIV terms to get
   there usefully).
-- Gemini 3.x flash models reason by default; if used, send
-  `reasoning: {effort: "none"}` or TTFT balloons.
+- **Gemini 3.8 Flash thinks by default (level `medium`) and that is the
+  entire latency problem.** Artificial Analysis measures ~13 s time to first
+  token at the default level; OpenRouter's own p50 with the best provider is
+  ~0.76 s. `minimal` is rejected with a 400 on 3.7/3.8 Flash and thinking
+  cannot be fully disabled, so `reasoning.effort: "low"` (OpenRouter maps it
+  to Google's `thinking_level`) is the floor. `exclude: true` keeps thought
+  tokens out of the stream. Expect roughly 0.5–1.0 s to first token; if that
+  is still too slow in practice, fall back to `google/gemini-3.5-flash-lite`
+  (~0.3–0.7 s, no thinking tax) and keep 3.8 Flash for the outgoing EN→JA
+  flow where quality matters more than speed.
+- Other latency knobs that stack with the above: `stream: true`, short
+  `max_tokens`, `provider.sort: "latency"`, `:nitro` suffix for priority
+  endpoints (billed at priority rate), and a system prompt that forbids
+  commentary so output is just the lines.
 - Error handling: 429 → backoff with `X-RateLimit-*`; 402 → surface
   "credits/key limit" in the window; timeout 8 s, no fallback chains to
   other services.
@@ -193,14 +206,17 @@ That is enough for a JA↔EN tool.
 
 | Model | TTFT (p50) | Price | Notes |
 |---|---|---|---|
-| google/gemini-2.5-flash-lite | ~0.15–0.3 s | 0.10 / 0.40 | Recommended default |
-| google/gemini-3.1-flash-lite | similar | 0.25 / 1.50 | Better JA, disable reasoning |
-| openai/gpt-4.1-mini | ~0.4 s | 0.40 / 1.60 | Non-reasoning fallback |
-| anthropic/claude-haiku-4.5 | ~0.2–0.6 s | 1.00 / 5.00 | Best quality, 10x cost |
-| openai/gpt-5-nano | fast at `effort: minimal` | 0.05 / 0.40 | Classifier role if ever needed |
+| google/gemini-3.8-flash | ~0.76 s at `effort: low`; ~13 s at default | 0.75 / 3.75 | **Chosen default.** User-verified JA quality. Must send low effort. |
+| google/gemini-3.5-flash-lite | ~0.3–0.7 s | 0.30 / 2.50 | Fallback / swap-in if 3.8 feels slow |
+| google/gemini-2.5-flash-lite | ~0.15–0.3 s | 0.10 / 0.40 | Cheapest, no thinking |
+| openai/gpt-4.1-mini | ~0.4 s | 0.40 / 1.60 | Non-Google fallback |
+| anthropic/claude-haiku-4.5 | ~0.2–0.6 s | 1.00 / 5.00 | Best quality, 10x flash-lite |
 
-A busy evening of chat (~2,000 lines, ~60 tokens each round-trip) is a few
-cents on flash-lite.
+Cost at ~2,000 lines per evening, ~80 tokens in + ~40 out each (plus the
+cached system prompt): about $0.30/evening on 3.8 Flash, under $0.05 on
+2.5 flash-lite. Model is a config field, so this is tunable without a
+rebuild. The plugin logs ms-to-first-token per request so the user can
+compare models in their own conditions.
 
 Two API keys: OpenRouter supports unlimited keys per account, each with its
 own credit limit and reset period. If the gate stays client-side only one key
@@ -209,10 +225,28 @@ be added later without a schema change.
 
 ---
 
-## 4. UI
+## 4. UI (decided)
 
 Single `Window` from `Dalamud.Interface.Windowing`, flags `NoScrollbar`,
-`SizeConstraints` with a sensible minimum.
+`SizeConstraints` with a sensible minimum. Decisions:
+
+- Two-pane aligned table, original left, translation right, one row per
+  message. No tabs in v1; a channel filter dropdown with checkboxes instead.
+- Vanilla chat stays visible in v1. The user shrinks it to a strip. Hiding it
+  is a v2 toggle.
+- Input block is pinned to the bottom of the window. The breakdown panel
+  expands *above* the input box (not a popup), so the log is pushed up and
+  nothing is covered.
+- Enter in the input = translate; Enter again = send; Esc = cancel/edit;
+  Ctrl+Enter = send without re-translate after manual edits to the JA text.
+- Sent messages appear in the log as their own row (left: EN draft, right:
+  JA sent) with a distinct color.
+- Right cell shows `…` until the first token, then streams; a failed request
+  shows `⚠ retry` as a clickable text in the cell.
+- Hover on a right cell shows a tooltip with the full original (useful for
+  long macro batches that were wrapped).
+- Font: Axis at a configurable size, default 14 px; one slider for both
+  panes.
 
 ```
 ┌─ JP/EN Chat ───────────────────────────────────────────────┐
@@ -343,15 +377,17 @@ Framework.RunOnFrameworkThread(() => Send("/p " + ja));
 
 ---
 
-## 8. Open decisions
+## 8. Decisions log
 
-- **Hide vanilla chat in v1?** Recommendation: no. Keep it simple; let the
-  window live next to a shrunk vanilla log. Revisit once the window is
-  trusted.
-- **Translate own EN messages for JP readers in the log?** Not needed; the
-  user sees their own text.
-- **Single key vs. two keys**: one key is enough with a client-side gate.
-  Keep a second optional key field for a future classifier role.
-- **Direction EN→JA on incoming?** Some JP-server English speakers will chat
-  in EN; translating EN lines to JA in the log is pointless for the user.
-  Only JA (and optionally other non-EN) lines go to the translator.
+- **Model**: `google/gemini-3.8-flash` with `reasoning.effort: "low"`,
+  streaming, latency-sorted provider. Fallback `gemini-3.5-flash-lite`.
+  Reason: user confirmed 3.8 Flash's JA quality; low thinking level is the
+  only way to keep it fast, and it is still roughly 2x slower to first token
+  than flash-lite. Config field, re-evaluate from the timing logs.
+- **Hide vanilla chat in v1**: no. Window lives next to a shrunk vanilla log.
+- **Gate**: client-side only (cache + per-sender debounce). No second LLM.
+- **Keys**: one key. Second optional key field kept in config for later.
+- **Direction on incoming**: only lines containing kana/kanji go to the
+  translator. EN lines are shown as-is with an empty right cell.
+- **Own messages**: skipped on ingest except TellOutgoing; sent messages are
+  added to the log by the send path instead.
