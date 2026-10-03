@@ -12,7 +12,7 @@ A Dalamud plugin for English speakers playing on Japanese data centers.
 
 1. In game, run `/xlsettings` and open **Experimental**.
 2. Under **Custom Plugin Repositories**, add
-   `https://raw.githubusercontent.com/colliexiv/ffxivjpentranslate/main/repo.json`, tick **Enabled**, and click **Save**.
+   `https://raw.githubusercontent.com/colliexiv/ffxivjpentranslate/claude/dalamud-ffxiv-translation-plugin-66t6li/repo.json`, tick **Enabled**, and click **Save**.
 3. Run `/xlplugins`, search for **JP/EN Chat** and install it.
 4. Run `/jpchat config`, open the **Keys** tab and paste your OpenRouter API key.
 
