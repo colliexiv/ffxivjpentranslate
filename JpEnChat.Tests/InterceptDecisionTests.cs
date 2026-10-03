@@ -226,4 +226,17 @@ public class InterceptDecisionTests
     {
         Assert.Null(Ui.OutgoingChannels.FromShellChatType(chatType));
     }
+
+    [Theory]
+    [InlineData(0x1000, 0x1000, 0x1000, (int)ChatInputHookSource.Both)]
+    [InlineData(0x1000, 0x2000, 0x2000, (int)ChatInputHookSource.CallSiteDiffers)]
+    [InlineData(0x1000, 0, 0x1000, (int)ChatInputHookSource.ClientStructsOnly)]
+    [InlineData(0, 0x2000, 0x2000, (int)ChatInputHookSource.CallSiteOnly)]
+    [InlineData(0, 0, 0, (int)ChatInputHookSource.None)]
+    public void ChatInputHookTargetPrefersCallSite(long clientStructs, long callSite, long expected, int source)
+    {
+        var (address, chosen) = ChatInputHookTarget.Choose((nint)clientStructs, (nint)callSite);
+        Assert.Equal((nint)expected, address);
+        Assert.Equal((ChatInputHookSource)source, chosen);
+    }
 }

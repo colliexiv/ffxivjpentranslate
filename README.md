@@ -88,7 +88,7 @@ You do not have to use the plugin window to talk. With **Translate English typed
 1. Type English in the normal chat box and press **Enter**. Instead of being sent, the line is held back and a small popup opens next to the chat box with the translation.
 2. Check the Japanese (it is editable, with the same breakdown, back-translation and polite/casual toggle as the main window) and press **Enter** to send it.
 
-Only plain English chat is held back. Everything else is sent exactly as the game would send it: Japanese, commands such as `/dance`, `/wave` or `/xlplugins`, `/e` echo, lines that are only a link, a number or symbols, and lines containing item links or auto-translate phrases.
+Only plain English chat is held back (lines run by a macro never are). Everything else is sent exactly as the game would send it: Japanese, commands such as `/dance`, `/wave` or `/xlplugins`, `/e` echo, lines that are only a link, a number or symbols, and lines containing item links or auto-translate phrases.
 
 A channel command you type stays in front of the translation: `/p hello` sends `/p こんにちは`, and `/t Tanaka Taro@Gaia hello`, `/r thanks`, `/l3 …`, `/cwl1 …`, `/fc …` keep their prefix exactly. Without a prefix, the Japanese goes to the channel selected in the chat box, as your Enter would have. The popup shows the channel it will use.
 
@@ -97,6 +97,8 @@ A channel command you type stays in front of the translation: `/p hello` sends `
 - Hold **Ctrl** while pressing Enter in the game's chat box. The modifier can be changed to Shift or Alt, or turned off, in settings. To my knowledge the game's chat box does not use Ctrl+Enter for anything else.
 - Or start the line with the bypass prefix `\`: `\hello` sends `hello`, and `/p \hello` sends `/p hello`. The prefix (1–3 characters) can be changed in settings.
 - Or press **Shift+Enter** (or click **Send English**) in the popup.
+
+The plugin hooks the function the chat box calls on Enter (ClientStructs' `ShellCommandModule.ExecuteCommandInner`, cross-checked against the chat box's call site). At load it logs both addresses it found to `/xllog`; if neither can be found, the plugin logs a warning and works without this feature. Version 0.2.0.0 hooked `ProcessChatBoxEntry` instead, which the chat box does not call, so typed lines were never held back; 0.2.1.0 fixes that.
 
 `/jpchat auto` turns the feature on or off and prints the new state in chat.
 
@@ -166,7 +168,8 @@ These depend on the live client and have not been checked in game yet:
 - Esc handling in the input boxes and with the window focused.
 - IME input: confirming an IME composition with Enter must not also trigger a translation or send.
 - Height of the breakdown panel on its first frame (it is measured, so the first frame may jump).
-- Chat-box hook: `UIModule.ProcessChatBoxEntry` hooks on the current game build, and the game's chat box calls it on Enter (if the hook cannot be installed, the plugin logs a warning and works without the feature).
+- Chat-box hook address: which of the two candidates matched. At plugin load `/xllog` shows `[JpEnChat] chat input hook: ExecuteCommandInner=…, chat-box call target=…` and then the address hooked; the two should be equal. If they differ the plugin hooks the chat-box call target and logs a warning; if neither is found it logs a warning and works without the feature.
+- Lines run by a game macro are never held (detected by `RaptureShellModule.MacroCurrentLine`, assumed negative when no macro is running).
 - On an intercepted line the game has already cleared its input box (the original function is not called).
 - Restoring your English into the chat box on Esc (`AtkComponentTextInput.SetText`): whether the text appears and the box behaves normally afterwards. The clipboard fallback is used only if the call is impossible.
 - The bypass modifier: Ctrl (Shift, Alt) is read as held at the moment the game processes Enter, and the game's chat box still sends on Ctrl+Enter.

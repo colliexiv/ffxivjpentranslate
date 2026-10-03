@@ -11,8 +11,10 @@ namespace JpEnChat.Chat;
 /// <remarks>
 /// <para>Uses <c>UIModule.ProcessChatBoxEntry</c>, the same entry point as ChatTwo's normal send path and ECommons'
 /// <c>Chat.SendMessage</c>. It handles both chat commands (<c>/p …</c>, <c>/t Name@World …</c>) and plain text the way
-/// the chat box does. <c>RaptureShellModule.ExecuteCommandInner</c> also exists in this ClientStructs build, but it
-/// only runs commands and ChatTwo uses it only for a special tell case, so it is not used here.</para>
+/// the chat box does: <c>ProcessChatBoxEntry</c> hands the line on to <c>ShellCommandModule.ExecuteCommandInner</c>, the
+/// shell's chat-input processor that handles plain chat text and commands alike (the game's chat box calls that function
+/// directly on Enter). Because <see cref="ChatSendHook"/> hooks that function, every send here re-enters its detour on
+/// this thread; <see cref="ChatSendHook.SendBypassingHook"/> sets its bypass flag around this call.</para>
 /// <para>Only called after an explicit user confirmation (second Enter in the composer). Never sends automatically.</para>
 /// </remarks>
 public sealed unsafe class GameChatSender : IChatSender

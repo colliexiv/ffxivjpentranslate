@@ -405,10 +405,10 @@ Framework.RunOnFrameworkThread(() => Send("/p " + ja));
   the target), except the echo of a tell the plugin itself just sent, which is dropped because the composer already
   added that row.
 - **Send path**: `UIModule.ProcessChatBoxEntry(Utf8String*, nint a4 = 0, bool saveToHistory = false)`, as ChatTwo's
-  normal send and ECommons do. `RaptureShellModule.ExecuteCommandInner` exists too but only runs commands (ChatTwo
-  uses it for one special tell case). Before the game call, `ChatSendValidation` rejects empty text, more than
-  500 UTF-8 bytes and control characters; then the text must survive `SanitizeString((AllowedEntities)0x27F)`
-  unchanged.
+  normal send and ECommons do. It hands the line on to `ShellCommandModule.ExecuteCommandInner`, the shell's
+  chat-input processor for plain text and commands alike (the function the chat-box hook in §9.1 targets). Before the
+  game call, `ChatSendValidation` rejects empty text, more than 500 UTF-8 bytes and control characters; then the text
+  must survive `SanitizeString((AllowedEntities)0x27F)` unchanged.
 
 ---
 
@@ -432,22 +432,37 @@ Framework.RunOnFrameworkThread(() => Send("/p " + ja));
 ## 9. Phase 4: vanilla chat integration
 
 Goal: the user keeps typing in the game's own chat box. Plain English is translated before it is sent, without opening
-the plugin window. Version 0.2.0.0.
+the plugin window. Version 0.2.0.0; 0.2.1.0 moved the hook to the function the chat box actually calls (§9.1).
 
 ### 9.1 Hook
 
-- `Chat/ChatSendHook` hooks `UIModule.ProcessChatBoxEntry` through `IGameInteropProvider.HookFromAddress`. Native
-  signature per ClientStructs' `[MemberFunction]`: `void (UIModule* this, Utf8String* message, nint a4, bool
-  saveToHistory)`. The managed delegate is `void (UIModule*, Utf8String*, nint, byte)`; `byte` for the bool so
-  marshalling reads one byte. Address: `UIModule.Addresses.ProcessChatBoxEntry.Value` (ClientStructs resolves it from
-  the signature `48 89 5C 24 ?? 48 89 74 24 ?? 57 48 83 EC 20 48 8B F2 48 8B F9 45 84 C9` at startup).
+- `Chat/ChatSendHook` hooks the shell's chat-input processor, `void (ShellCommandModule* self, Utf8String* message,
+  UIModule* uiModule)` (ClientStructs' `ShellCommandModule.ExecuteCommandInner`), through
+  `IGameInteropProvider.HookFromAddress`. The game's chat box calls it on Enter for every line, plain text and commands
+  alike. 0.2.0.0 hooked `UIModule.ProcessChatBoxEntry` instead; that is only the entry point plugins call to send
+  chat, the chat box does not go through it, and the hook never fired for typed text (confirmed in game).
+- Address, resolved once at construction (any failure counts as 0):
+  1. `ShellCommandModule.Addresses.ExecuteCommandInner.Value` (ClientStructs, signature
+     `E8 ?? ?? ?? ?? 48 8D 4C 24 ?? E8 ?? ?? ?? ?? 89 6E`).
+  2. `ISigScanner.TryScanText("E8 ?? ?? ?? ?? FE 87 ?? ?? ?? ?? C7 87")`, the chat box's call site, as hooked by
+     GagSpeak and MeowyUtils (proven against keyboard input). Dalamud's `ScanText` follows a leading `E8`/`E9` to the
+     call's destination (`ReadJmpCallSig`: address + 5 + rel32), so the result is the function itself.
+
+  Both are logged at Information (`chat input hook: ExecuteCommandInner=…, chat-box call target=…`). Choice
+  (`ChatInputHookTarget.Choose`): equal → hook it; both found but different → hook the call-site target, with a
+  warning; only one found → hook that one; neither → feature disabled with a warning. Exactly one hook is installed;
+  the chosen address and source are logged.
+- Our own sends (`SendBypassingHook` → `GameChatSender.Send` → `ProcessChatBoxEntry`) re-enter the detour on the same
+  thread; the bypass flag, set before `Send` and cleared in `finally`, passes them straight through.
+- Lines run by a macro (which may go through the same function) always pass: `RaptureShellModule.MacroCurrentLine >= 0`
+  means a macro is running (negative when idle, as SimpleTweaks reads it).
 - Detour (framework thread): read `message->ToString()`, decide with the pure `InterceptDecision.Decide(text,
   enabled, bypassPrefix, modifierHeld)`:
   1. disabled → pass; 2. bypass modifier held (`IKeyState`, Ctrl by default) → pass; 3. empty or control characters
   (item links, auto-translate payload bytes) → pass; 4. bypass prefix (`\`) at the start or right after a channel
-  command → call the original with the prefix stripped (new `Utf8String`, disposed after); 5. a leading `/` that is
-  not a chat-channel command (`OutgoingChannels.TrySplitChatCommand`; `/e` counts as not) → pass; 6. body empty, only
-  links/numbers/symbols, or containing Japanese → pass; 7. else intercept.
+  command → call the original with the prefix stripped (new `Utf8String`, `Dtor(true)` after it returns); 5. a
+  leading `/` that is not a chat-channel command (`OutgoingChannels.TrySplitChatCommand`; `/e` counts as not) → pass;
+  6. body empty, only links/numbers/symbols, or containing Japanese → pass; 7. else intercept.
 - Intercept: the original is **not** called (the chat box has already cleared its input). `OnIntercept` (the popup)
   gets the prefix exactly as typed, the body, the raw line, and the channel (typed command, else
   `RaptureShellModule.ChatType`/`TellName`/`TellWorld`). The body is logged only at Debug.

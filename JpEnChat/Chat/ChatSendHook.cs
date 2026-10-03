@@ -6,6 +6,7 @@ using Dalamud.Hooking;
 using FFXIVClientStructs.FFXIV.Client.System.String;
 using FFXIVClientStructs.FFXIV.Client.UI;
 using FFXIVClientStructs.FFXIV.Client.UI.Shell;
+using FFXIVClientStructs.FFXIV.Component.Shell;
 using JpEnChat.Translation;
 using JpEnChat.Ui;
 
@@ -28,29 +29,92 @@ public sealed record InterceptedMessage(
     string? TellTarget,
     string ChannelLabel);
 
+/// <summary>Which address <see cref="ChatSendHook"/> hooked (logged at plugin load).</summary>
+internal enum ChatInputHookSource
+{
+    /// <summary>Neither address resolved; the feature is disabled.</summary>
+    None,
+
+    /// <summary>ClientStructs' <c>ExecuteCommandInner</c> and the chat-box call target are the same function.</summary>
+    Both,
+
+    /// <summary>Both resolved but differ; the chat-box call target (proven against keyboard input) was hooked.</summary>
+    CallSiteDiffers,
+
+    /// <summary>Only ClientStructs' <c>ExecuteCommandInner</c> resolved.</summary>
+    ClientStructsOnly,
+
+    /// <summary>Only the chat-box call target resolved.</summary>
+    CallSiteOnly,
+}
+
+/// <summary>Chooses the chat-input hook address from the two candidates (pure, PLAN §9.1).</summary>
+internal static class ChatInputHookTarget
+{
+    /// <summary>
+    /// Both nonzero and equal: hook it. Both nonzero and different: hook the chat-box call target. One nonzero: hook
+    /// that one. Neither: nothing (<see cref="nint.Zero"/>). Only ever one address, so at most one hook is installed.
+    /// </summary>
+    /// <param name="clientStructs"><c>ShellCommandModule.Addresses.ExecuteCommandInner.Value</c>, 0 if unresolved.</param>
+    /// <param name="callSiteTarget">Destination of the chat box's call, 0 if the signature was not found.</param>
+    public static (nint Address, ChatInputHookSource Source) Choose(nint clientStructs, nint callSiteTarget)
+    {
+        if (clientStructs != nint.Zero && callSiteTarget != nint.Zero)
+        {
+            return clientStructs == callSiteTarget
+                ? (callSiteTarget, ChatInputHookSource.Both)
+                : (callSiteTarget, ChatInputHookSource.CallSiteDiffers);
+        }
+
+        if (callSiteTarget != nint.Zero)
+        {
+            return (callSiteTarget, ChatInputHookSource.CallSiteOnly);
+        }
+
+        if (clientStructs != nint.Zero)
+        {
+            return (clientStructs, ChatInputHookSource.ClientStructsOnly);
+        }
+
+        return (nint.Zero, ChatInputHookSource.None);
+    }
+}
+
 /// <summary>
-/// Hooks <c>UIModule.ProcessChatBoxEntry</c>, the function the game's chat box calls on Enter, so plain English can
-/// be translated in a popup before it is sent (PLAN §9).
+/// Hooks the shell's chat-input processor, the function the game's chat box calls on Enter for every line (plain
+/// text and commands alike), so plain English can be translated in a popup before it is sent (PLAN §9).
 /// </summary>
 /// <remarks>
 /// <para><b>Safety rules.</b> (1) Our own sends set <see cref="bypass"/> around the game call and pass straight
 /// through. (2) Every decision goes through <see cref="InterceptDecision"/>, which passes anything that is not plainly
-/// English chat. (3) Any exception in the detour, or no handler accepting the line, calls the original function, so a
-/// bug can never eat a message. (4) If the hook cannot be installed the plugin runs without the feature.</para>
-/// <para><b>Signature.</b> <c>void ProcessChatBoxEntry(UIModule* this, Utf8String* message, nint a4, bool
-/// saveToHistory)</c> per ClientStructs' <c>[MemberFunction]</c> (<c>UIModule.Delegates.ProcessChatBoxEntry</c>).
-/// The managed delegate uses <c>byte</c> for the bool so marshalling reads exactly one byte. The address is
-/// <c>UIModule.Addresses.ProcessChatBoxEntry.Value</c>, resolved by ClientStructs' signature scanner at startup.</para>
+/// English chat; lines run by a macro always pass. (3) Any exception in the detour, or no handler accepting the line,
+/// calls the original function, so a bug can never eat a message. (4) If the hook cannot be installed the plugin runs
+/// without the feature.</para>
+/// <para><b>Target.</b> <c>void (ShellCommandModule* self, Utf8String* message, UIModule* uiModule)</c>, ClientStructs'
+/// <c>ShellCommandModule.ExecuteCommandInner</c> (<c>ShellCommandModule.Delegates.ExecuteCommandInner</c>). Not
+/// <c>UIModule.ProcessChatBoxEntry</c>: that is only the entry point plugins call to send chat, and the game's chat
+/// box does not go through it, so a hook there never sees typed text. <c>ProcessChatBoxEntry</c> itself ends up in
+/// this function, which is why our own sends re-enter the detour (covered by <see cref="bypass"/>).</para>
+/// <para><b>Address.</b> Two candidates are resolved at construction: ClientStructs'
+/// <c>ShellCommandModule.Addresses.ExecuteCommandInner.Value</c>, and the destination of the call at the chat box's
+/// call site <c>E8 ?? ?? ?? ?? FE 87 ?? ?? ?? ?? C7 87</c> (the signature GagSpeak and MeowyUtils hook, proven against
+/// real keyboard input). Dalamud's <c>ScanText</c> already follows a leading <c>E8</c>/<c>E9</c> to the call target,
+/// so the scan result is the function itself. Both are logged at Information; the choice is
+/// <see cref="ChatInputHookTarget.Choose"/> (prefer the call-site target when they differ, with a warning). Exactly one
+/// hook is installed.</para>
 /// <para>The detour runs on the framework thread (the game's chat box handles Enter there).</para>
 /// </remarks>
 public sealed unsafe class ChatSendHook : IDisposable
 {
-    private delegate void ProcessChatBoxEntryDelegate(UIModule* uiModule, Utf8String* message, nint a4, byte saveToHistory);
+    /// <summary>Call site in the chat box's Enter handling; starts with <c>E8</c>, so the scan yields the call's target.</summary>
+    private const string ChatBoxCallSiteSignature = "E8 ?? ?? ?? ?? FE 87 ?? ?? ?? ?? C7 87";
+
+    private delegate void ChatInputDelegate(ShellCommandModule* self, Utf8String* message, UIModule* uiModule);
 
     private readonly Configuration configuration;
     private readonly IChatSender sender;
     private readonly ILog log;
-    private readonly Hook<ProcessChatBoxEntryDelegate>? hook;
+    private readonly Hook<ChatInputDelegate>? hook;
     private readonly HashSet<Type> loggedErrors = [];
 
     private bool bypass;
@@ -67,21 +131,30 @@ public sealed unsafe class ChatSendHook : IDisposable
 
         try
         {
-            var address = UIModule.Addresses.ProcessChatBoxEntry.Value;
-            if (address == nint.Zero)
+            var csAddress = ResolveClientStructsAddress();
+            var sigAddress = ResolveChatBoxCallTarget();
+            log.Information($"[JpEnChat] chat input hook: ExecuteCommandInner={csAddress:X}, chat-box call target={sigAddress:X}");
+
+            var (address, source) = ChatInputHookTarget.Choose(csAddress, sigAddress);
+            switch (source)
             {
-                log.Warning("[JpEnChat] ProcessChatBoxEntry address not resolved; translating from the game's chat box is disabled.");
-                return;
+                case ChatInputHookSource.None:
+                    log.Warning("[JpEnChat] chat input function not found (neither ExecuteCommandInner nor the chat-box call target resolved); translating from the game's chat box is disabled.");
+                    return;
+                case ChatInputHookSource.CallSiteDiffers:
+                    log.Warning($"[JpEnChat] ExecuteCommandInner ({csAddress:X}) differs from the chat-box call target ({sigAddress:X}); hooking the chat-box call target.");
+                    break;
             }
 
-            hook = Services.GameInteropProvider.HookFromAddress<ProcessChatBoxEntryDelegate>(address, Detour);
+            hook = Services.GameInteropProvider.HookFromAddress<ChatInputDelegate>(address, Detour);
             hook.Enable();
+            log.Information($"[JpEnChat] chat input hook installed at {address:X} ({source}).");
         }
         catch (Exception ex)
         {
             hook?.Dispose();
             hook = null;
-            log.Error(ex, "[JpEnChat] could not hook ProcessChatBoxEntry; translating from the game's chat box is disabled.");
+            log.Error(ex, "[JpEnChat] could not hook the chat input function; translating from the game's chat box is disabled.");
         }
     }
 
@@ -98,6 +171,12 @@ public sealed unsafe class ChatSendHook : IDisposable
     /// Sends one line through <see cref="IChatSender"/> without it being intercepted. Framework thread only.
     /// Every send the plugin makes goes through here.
     /// </summary>
+    /// <remarks>
+    /// <see cref="GameChatSender"/> calls <c>UIModule.ProcessChatBoxEntry</c>, which calls the hooked chat input
+    /// function synchronously on this same thread, so the detour runs inside <c>sender.Send</c>. <see cref="bypass"/>
+    /// is set before that call and cleared in <c>finally</c>, so the re-entrant detour always passes the line straight
+    /// to the original, and the flag can never stay set after a throw.
+    /// </remarks>
     public void SendBypassingHook(string text)
     {
         bypass = true;
@@ -124,11 +203,44 @@ public sealed unsafe class ChatSendHook : IDisposable
         hook?.Dispose();
     }
 
-    private void Detour(UIModule* uiModule, Utf8String* message, nint a4, byte saveToHistory)
+    /// <summary>ClientStructs' address for <c>ShellCommandModule.ExecuteCommandInner</c>; 0 if unresolved.</summary>
+    private nint ResolveClientStructsAddress()
     {
+        try
+        {
+            return ShellCommandModule.Addresses.ExecuteCommandInner.Value;
+        }
+        catch (Exception ex)
+        {
+            log.Warning($"[JpEnChat] ExecuteCommandInner address unavailable ({ex.GetType().Name}).");
+            return nint.Zero;
+        }
+    }
+
+    /// <summary>
+    /// The function the chat box calls at <see cref="ChatBoxCallSiteSignature"/>; 0 if not found. Dalamud's
+    /// <c>ScanText</c> resolves a signature that starts with <c>E8</c> (or <c>E9</c>) to the call's destination
+    /// (<c>SigScanner.ReadJmpCallSig</c>: <c>address + 5 + rel32</c>), so the result is not resolved again here.
+    /// </summary>
+    private nint ResolveChatBoxCallTarget()
+    {
+        try
+        {
+            return Services.SigScanner.TryScanText(ChatBoxCallSiteSignature, out var target) ? target : nint.Zero;
+        }
+        catch (Exception ex)
+        {
+            log.Warning($"[JpEnChat] chat-box call-site scan failed ({ex.GetType().Name}).");
+            return nint.Zero;
+        }
+    }
+
+    private void Detour(ShellCommandModule* self, Utf8String* message, UIModule* uiModule)
+    {
+        // Our own sends re-enter here from ProcessChatBoxEntry; bypass covers them (see SendBypassingHook).
         if (bypass || disposed || message == null || OnIntercept == null)
         {
-            hook!.Original(uiModule, message, a4, saveToHistory);
+            hook!.Original(self, message, uiModule);
             return;
         }
 
@@ -136,20 +248,26 @@ public sealed unsafe class ChatSendHook : IDisposable
         InterceptResult decision;
         try
         {
+            if (IsMacroRunning())
+            {
+                hook!.Original(self, message, uiModule);
+                return;
+            }
+
             raw = message->ToString();
             decision = InterceptDecision.Decide(raw, configuration, IsBypassModifierHeld());
         }
         catch (Exception ex)
         {
             LogOnce(ex);
-            hook!.Original(uiModule, message, a4, saveToHistory);
+            hook!.Original(self, message, uiModule);
             return;
         }
 
         switch (decision.Action)
         {
             case InterceptAction.PassRewritten:
-                SendRewritten(uiModule, message, a4, saveToHistory, decision.Rewritten);
+                SendRewritten(self, message, uiModule, decision.Rewritten);
                 return;
 
             case InterceptAction.Intercept:
@@ -166,21 +284,21 @@ public sealed unsafe class ChatSendHook : IDisposable
 
                 if (!accepted)
                 {
-                    hook!.Original(uiModule, message, a4, saveToHistory);
+                    hook!.Original(self, message, uiModule);
                     return;
                 }
 
-                log.Debug($"[JpEnChat] held a chat-box line for translation ({ChatSendValidation.ChannelPrefix(raw)}, saveToHistory={saveToHistory}).");
+                log.Debug($"[JpEnChat] held a chat-box line for translation ({ChatSendValidation.ChannelPrefix(raw)}).");
                 return;
 
             default:
-                hook!.Original(uiModule, message, a4, saveToHistory);
+                hook!.Original(self, message, uiModule);
                 return;
         }
     }
 
     /// <summary>Calls the original function with the bypass prefix removed; falls back to the unchanged line on error.</summary>
-    private void SendRewritten(UIModule* uiModule, Utf8String* message, nint a4, byte saveToHistory, string rewritten)
+    private void SendRewritten(ShellCommandModule* self, Utf8String* message, UIModule* uiModule, string rewritten)
     {
         Utf8String* replacement;
         try
@@ -190,18 +308,28 @@ public sealed unsafe class ChatSendHook : IDisposable
         catch (Exception ex)
         {
             LogOnce(ex);
-            hook!.Original(uiModule, message, a4, saveToHistory);
+            hook!.Original(self, message, uiModule);
             return;
         }
 
         try
         {
-            hook!.Original(uiModule, replacement, a4, saveToHistory);
+            hook!.Original(self, replacement, uiModule);
         }
         finally
         {
             replacement->Dtor(true);
         }
+    }
+
+    /// <summary>
+    /// A macro line goes through the same function; it is never held (a macro is not the user typing in the chat box).
+    /// <c>MacroCurrentLine</c> is negative when no macro is running (as SimpleTweaks' command tweaks read it).
+    /// </summary>
+    private static bool IsMacroRunning()
+    {
+        var shell = RaptureShellModule.Instance();
+        return shell != null && shell->MacroCurrentLine >= 0;
     }
 
     private bool IsBypassModifierHeld()
