@@ -221,6 +221,29 @@ public sealed class ConfigWindow : Window, IDisposable
             configuration.DefaultRegister = Registers.Casual;
             Commit();
         }
+
+        ImGui.Separator();
+        ImGui.TextUnformatted("Party Finder");
+
+        var pfMenu = configuration.PartyFinderContextMenu;
+        if (ImGui.Checkbox("Add 'Translate' to the Party Finder right-click menu", ref pfMenu))
+        {
+            configuration.PartyFinderContextMenu = pfMenu;
+            Commit();
+        }
+
+        ImGuiComponents.HelpMarker(
+            "Right-click a listing's detail window in the Party Finder and choose Translate to translate its description. "
+            + "The translation is also added to the log as a [PF] row.");
+
+        var pfPopup = configuration.PartyFinderPopup;
+        if (ImGui.Checkbox("Show Party Finder translations in a popup next to the listing", ref pfPopup))
+        {
+            configuration.PartyFinderPopup = pfPopup;
+            Commit();
+        }
+
+        ImGuiComponents.HelpMarker("When off, the translation only goes to the log and the JP/EN chat window is opened.");
     }
 
     // ---- Translation ----

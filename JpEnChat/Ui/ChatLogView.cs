@@ -160,7 +160,7 @@ internal sealed class ChatLogView
         for (var i = 0; i < lines.Count; i++)
         {
             var line = lines[i];
-            if (hiddenChannels.Contains(line.Kind))
+            if (line.IsPartyFinder ? configuration.PartyFinderHidden : hiddenChannels.Contains(line.Kind))
             {
                 continue;
             }
@@ -217,8 +217,10 @@ internal sealed class ChatLogView
 
     private void DrawOriginal(ChatLine line, string world)
     {
-        var color = line.IsSentByPlugin ? ChatChannels.SentColor : ChatChannels.Color(line.Kind);
-        var tag = ChatChannels.Tag(line.Kind);
+        var color = ChatChannels.Color(line);
+        var tag = line.Context is { Length: > 0 } context
+            ? $"{ChatChannels.Tag(line)} {context} ·"
+            : ChatChannels.Tag(line);
         var showWorld = line.SenderWorld.Length > 0 && !string.Equals(line.SenderWorld, world, StringComparison.Ordinal);
         var showTime = configuration.ShowTimestamps;
 

@@ -374,6 +374,7 @@ Framework.RunOnFrameworkThread(() => Send("/p " + ja));
 | M4 | Outgoing: EN input → structured JA + breakdown → confirm → `ProcessChatBoxEntry` | can chat in JP | done (Phases 2A, 2B, 3) |
 | M5 | Polish: channel colors, tabs/filters, byte counter, politeness toggle, `repo.json` release | installable from custom repo | done (Phases 2B, 3) |
 | P4 | Vanilla chat integration: translate English typed into the game's chat box in a popup; chat-bar button | | done (Phase 4, §9) |
+| P5 | Party Finder: "Translate" in a listing's right-click menu, popup next to the listing, `[PF]` log rows | | done (Phase 5, §10) |
 | v2 | Hide vanilla chat, backfill history from `RaptureLogModule`, optional LLM gate for ambiguous bursts, glossary editor | | open |
 
 "Done" means implemented, building with zero warnings and unit-tested; in-game verification is still pending (README,
@@ -510,3 +511,48 @@ tab is found) plus `ChatBarButtonOffsetX/Y`. Hidden when the addon is missing or
 on edit), `BypassModifier` (Ctrl/Shift/Alt/None, default Ctrl), `PopupOffsetX/Y` (0), `ShowChatBarButton` (true),
 `ChatBarButtonOffsetX/Y` (4, 0). Schema version stays 1 (additive fields). `/jpchat auto` toggles
 `InterceptVanillaChat` and prints the state with `IChatGui.Print`, the plugin's only chat print.
+
+---
+
+## 10. Phase 5: Party Finder listings
+
+Goal: translate a Party Finder listing's description on request, as ChatTranslated does. Version 0.3.0.0.
+
+- **Menu item.** `PartyFinder/PartyFinderTranslator` subscribes `IContextMenu.OnMenuOpened` and, when
+  `args.AddonName == "LookingForGroupDetail"` (ClientStructs' `[Addon("LookingForGroupDetail")]` on
+  `AddonLookingForGroupDetail`) and `PartyFinderContextMenu` is on, adds one reused `MenuItem { Name = "Translate",
+  UseDefaultPrefix = true }` (Dalamud's plugin prefix glyph and color). Unsubscribed in `Dispose`, together with the
+  other game-event sources and before the pipeline.
+- **Reading the listing** (`PartyFinder/PartyFinderAddon`, framework thread, in the click handler): cast
+  `IMenuItemClickedArgs.AddonPtr` to `AddonLookingForGroupDetail*`; description = `DescriptionString` (a `Utf8String`,
+  read as raw bytes with `AsSpan()`); duty = `DutyNameTextNode->GetText()`; leader = `PartyLeaderTextNode->GetText()`
+  (both `CStringPointer`, parsed with `SeString.Parse(...).TextValue`, icon glyphs stripped). Same field names as
+  ChatTranslated uses; `GetText()` now returns `CStringPointer` instead of `byte*`. `CategoriesString` is not used.
+- **Cleaning** (`PartyFinder/PartyFinderText.Clean`, pure, unit-tested): the icon payloads `02 12 02 37 03` and
+  `02 12 02 38 03` that wrap auto-translate phrases become `《` and `》` (ChatTranslated maps them to U+E040/U+E041,
+  the auto-translate bracket glyphs, which the log font cannot draw); text still containing a payload marker is decoded
+  with `SeString.Parse` and flattened by `SeStringText.Flatten`; private-use glyphs and control characters become
+  spaces; whitespace is collapsed.
+- **Translation.** The description becomes an ordinary `ChatLine` with `Kind = None`, `SourceLabel = "PF"`,
+  `SenderName = leader`, `Context = duty` and goes into the `ChatLog`, then through the new
+  `TranslationPipeline.EnqueueImmediate`: the same language check and cache lookup as `Enqueue` (shared `Admit`), but
+  a miss starts its own job at once instead of joining the sender's debounce batch, because a click is an explicit
+  request. Streaming, caching and retry are unchanged. Clicking Translate again on the same listing reuses its row
+  (retrying it if it failed) instead of adding a duplicate. Leader and duty are not sent to the model.
+- **Log.** `[PF]` tag and a teal color (`ChatChannels.Tag/Color(ChatLine)`), left cell
+  `HH:mm [PF] duty · leader: description`. The channel filter has a "Party Finder" entry backed by
+  `Configuration.PartyFinderHidden` (PF rows are not a chat channel, so they do not use `HiddenLogChannels`).
+- **Popup** (`PartyFinder/PartyFinderPopup`): plain `ImGui.Begin` window with the quick popup's flags except
+  `NoFocusOnAppearing`; Axis font; width 28 em (clamped 300–640 px, times the global scale). Content: header
+  "Party Finder · duty · leader", the description, a separator, the translation cell (`…`, streaming text, ⚠ error +
+  Retry → `pipeline.Retry`, "(not Japanese; not translated)" for a line the language check skipped), Copy and Close.
+  Placement: right of the `LookingForGroupDetail` addon, top-aligned (`X + width + 8·scale`, `Y`); left of it
+  (`X − 8·scale − popupWidth`) when the right side leaves the main viewport; centered when the addon rect cannot be
+  read; always clamped into the viewport. The addon rect comes from the new `Ui/AddonRect` helper, which `ChatLogAddon`
+  now uses too. Closes on Close, Esc (same key rule as the quick popup), when the detail window is no longer visible,
+  and when it shows a different listing (its `DescriptionString` bytes changed and are not empty). A new Translate
+  replaces the content.
+- **Config** (General tab): `PartyFinderContextMenu` (true), `PartyFinderPopup` (true; when off, only the log row is
+  added and the main window is opened and brought to front), `PartyFinderHidden` (false, set from the log filter).
+  Schema version stays 1. With the popup off, an empty description prints one line to chat with `IChatGui.Print`
+  (the second chat print after `/jpchat auto`).

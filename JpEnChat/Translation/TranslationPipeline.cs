@@ -14,8 +14,8 @@ namespace JpEnChat.Translation;
 /// translation jobs whose results are marshalled back to the framework thread.
 /// </summary>
 /// <remarks>
-/// <para><b>Threading.</b> <see cref="Enqueue"/> and <see cref="Retry"/> are called on the framework thread and
-/// may mutate the line synchronously. Debounce timers and jobs run on the thread pool; their only access to a
+/// <para><b>Threading.</b> <see cref="Enqueue"/>, <see cref="EnqueueImmediate"/> and <see cref="Retry"/> are called on
+/// the framework thread and may mutate the line synchronously. Debounce timers and jobs run on the thread pool; their only access to a
 /// <see cref="ChatLine"/> is reading immutable fields (<see cref="ChatLine.Id"/>, <see cref="ChatLine.Original"/>)
 /// and posting mutations through <c>runOnFrameworkThread</c>, which must run actions in submission order
 /// (Dalamud's <c>IFramework.RunOnFrameworkThread</c> does). Pending batches are guarded by one lock.</para>
@@ -105,29 +105,10 @@ public sealed class TranslationPipeline : IDisposable
     public void Enqueue(ChatLine line)
     {
         ArgumentNullException.ThrowIfNull(line);
-        if (disposed)
+        if (!Admit(line))
         {
             return;
         }
-
-        var lang = line.OriginalLang == Lang.Unknown ? detector.Detect(line.Original) : line.OriginalLang;
-        if (lang != Lang.Ja)
-        {
-            line.Status = TranslationStatus.None;
-            return;
-        }
-
-        if (config.CacheEnabled && cache.TryGet(line.Original, TranslationDirection.JaToEn, out var cached))
-        {
-            line.Translation = cached;
-            line.Error = null;
-            line.Status = TranslationStatus.CacheHit;
-            return;
-        }
-
-        line.Translation = string.Empty;
-        line.Error = null;
-        line.Status = TranslationStatus.Pending;
 
         var debounceMs = Math.Clamp(config.DebounceMs, 0, 10_000);
         var key = line.SenderName + "@" + line.SenderWorld;
@@ -162,6 +143,20 @@ public sealed class TranslationPipeline : IDisposable
         if (sendNow is not null)
         {
             StartJob(sendNow);
+        }
+    }
+
+    /// <summary>
+    /// Like <see cref="Enqueue"/> (language check, then cache), but a line that needs the model is sent at once in a
+    /// job of its own instead of waiting in its sender's debounce batch. For explicit user requests such as the Party
+    /// Finder "Translate" menu item. Framework thread only.
+    /// </summary>
+    public void EnqueueImmediate(ChatLine line)
+    {
+        ArgumentNullException.ThrowIfNull(line);
+        if (Admit(line))
+        {
+            StartJob([line]);
         }
     }
 
@@ -241,6 +236,39 @@ public sealed class TranslationPipeline : IDisposable
         SaveCache();
 
         // The CTS and semaphore are deliberately not disposed: jobs that are already unwinding still touch them.
+    }
+
+    /// <summary>
+    /// The shared gate of <see cref="Enqueue"/> and <see cref="EnqueueImmediate"/>: non-Japanese →
+    /// <see cref="TranslationStatus.None"/>, cache hit → <see cref="TranslationStatus.CacheHit"/>, otherwise
+    /// <see cref="TranslationStatus.Pending"/> and true (the caller queues the line).
+    /// </summary>
+    private bool Admit(ChatLine line)
+    {
+        if (disposed)
+        {
+            return false;
+        }
+
+        var lang = line.OriginalLang == Lang.Unknown ? detector.Detect(line.Original) : line.OriginalLang;
+        if (lang != Lang.Ja)
+        {
+            line.Status = TranslationStatus.None;
+            return false;
+        }
+
+        if (config.CacheEnabled && cache.TryGet(line.Original, TranslationDirection.JaToEn, out var cached))
+        {
+            line.Translation = cached;
+            line.Error = null;
+            line.Status = TranslationStatus.CacheHit;
+            return false;
+        }
+
+        line.Translation = string.Empty;
+        line.Error = null;
+        line.Status = TranslationStatus.Pending;
+        return true;
     }
 
     private void OnDebounceElapsed(object? state)

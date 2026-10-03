@@ -120,6 +120,20 @@ public sealed class Configuration : IPluginConfiguration
     /// <inheritdoc cref="ChatBarButtonOffsetX"/>
     public int ChatBarButtonOffsetY { get; set; } = DefaultChatBarButtonOffsetY;
 
+    // ---- Party Finder (PLAN §10) ----
+
+    /// <summary>Add a "Translate" item to the right-click menu of a Party Finder listing's detail window.</summary>
+    public bool PartyFinderContextMenu { get; set; } = true;
+
+    /// <summary>
+    /// Show a translated listing in a popup next to the listing. When off, only the log row is added and the main
+    /// window is opened.
+    /// </summary>
+    public bool PartyFinderPopup { get; set; } = true;
+
+    /// <summary>Party Finder rows are hidden by the main window's channel filter (display only).</summary>
+    public bool PartyFinderHidden { get; set; }
+
     public const string DefaultBypassPrefix = "\\";
     public const int MaxBypassPrefixLength = 3;
     public const int DefaultChatBarButtonOffsetX = 4;

@@ -1,5 +1,6 @@
 using System.Numerics;
 using Dalamud.Game.Text;
+using JpEnChat.Models;
 
 namespace JpEnChat.Ui;
 
@@ -36,6 +37,29 @@ internal static class ChatChannels
 
     /// <summary>Text color for rows produced by the plugin's own send path (PLAN §4: "distinct color").</summary>
     public static readonly Vector4 SentColor = Rgb(196, 160, 255);
+
+    /// <summary>Text color of Party Finder rows (teal, close to the Party Finder window's accent).</summary>
+    public static readonly Vector4 PartyFinderColor = Rgb(110, 214, 196);
+
+    /// <summary>Filter-list name of Party Finder rows.</summary>
+    public const string PartyFinderName = "Party Finder";
+
+    private const string PartyFinderTag = "[PF]";
+
+    /// <summary>
+    /// Tag of a log row: <c>[PF]</c> for a Party Finder row, <c>[label]</c> for another <see cref="ChatLine.SourceLabel"/>,
+    /// else the channel tag.
+    /// </summary>
+    public static string Tag(ChatLine line) => line.SourceLabel switch
+    {
+        null => Tag(line.Kind),
+        ChatLine.PartyFinderSource => PartyFinderTag,
+        var label => "[" + label + "]",
+    };
+
+    /// <summary>Text color of a log row: the plugin's sent color, the Party Finder color, or the channel color.</summary>
+    public static Vector4 Color(ChatLine line) =>
+        line.IsSentByPlugin ? SentColor : line.IsPartyFinder ? PartyFinderColor : Color(line.Kind);
 
     /// <summary>Short bracketed tag shown before the sender, e.g. <c>[P]</c>.</summary>
     public static string Tag(XivChatType kind) => kind switch

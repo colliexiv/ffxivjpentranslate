@@ -85,4 +85,19 @@ public sealed class ChatLine
 
     /// <summary>The line was produced by this plugin's outgoing flow (left: EN draft, right: JA sent).</summary>
     public bool IsSentByPlugin { get; init; }
+
+    /// <summary>
+    /// Where the line came from when it is not a chat message, e.g. <see cref="PartyFinderSource"/>. The log shows it
+    /// as the tag in place of the channel tag, and <see cref="Kind"/> is then <see cref="XivChatType.None"/>.
+    /// </summary>
+    public string? SourceLabel { get; init; }
+
+    /// <summary>Optional context shown before the sender in the log, e.g. a Party Finder listing's duty name.</summary>
+    public string? Context { get; init; }
+
+    /// <summary>The line is a Party Finder listing description (<see cref="SourceLabel"/> is <see cref="PartyFinderSource"/>).</summary>
+    public bool IsPartyFinder => string.Equals(SourceLabel, PartyFinderSource, StringComparison.Ordinal);
+
+    /// <summary><see cref="SourceLabel"/> of Party Finder listing descriptions.</summary>
+    public const string PartyFinderSource = "PF";
 }

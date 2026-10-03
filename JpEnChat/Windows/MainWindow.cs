@@ -123,7 +123,7 @@ public sealed class MainWindow : Window, IDisposable
 
     private void DrawToolbar()
     {
-        var hiddenCount = hiddenChannels.Count;
+        var hiddenCount = hiddenChannels.Count + (configuration.PartyFinderHidden ? 1 : 0);
         if (hiddenCount == 0 ? ImGui.Button("Channels###jpenChannels") : ImGui.Button($"Channels ({hiddenCount} hidden)###jpenChannels"))
         {
             ImGui.OpenPopup(FilterPopupId);
@@ -184,6 +184,7 @@ public sealed class MainWindow : Window, IDisposable
         if (ImGui.Button("All"))
         {
             hiddenChannels.Clear();
+            configuration.PartyFinderHidden = false;
             changed = true;
         }
 
@@ -195,6 +196,7 @@ public sealed class MainWindow : Window, IDisposable
                 hiddenChannels.Add(kind);
             }
 
+            configuration.PartyFinderHidden = true;
             changed = true;
         }
 
@@ -215,6 +217,17 @@ public sealed class MainWindow : Window, IDisposable
                     hiddenChannels.Add(kind);
                 }
 
+                changed = true;
+            }
+        }
+
+        // Party Finder listing translations are not a chat channel; they have their own flag.
+        var partyFinderVisible = !configuration.PartyFinderHidden;
+        using (ImRaii.PushColor(ImGuiCol.Text, ChatChannels.PartyFinderColor))
+        {
+            if (ImGui.Checkbox(ChatChannels.PartyFinderName, ref partyFinderVisible))
+            {
+                configuration.PartyFinderHidden = !partyFinderVisible;
                 changed = true;
             }
         }

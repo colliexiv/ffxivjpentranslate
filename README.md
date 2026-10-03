@@ -5,6 +5,7 @@ A Dalamud plugin for English speakers playing on Japanese data centers.
 - A two-pane chat window: the original message on the left and its English translation on the right, one row per message. A slow translation stays on the same row as its original.
 - An English input box: type English, press Enter to get Japanese with a word-by-word breakdown and a back-translation, then press Enter again to send it.
 - Translation from the game's own chat box: type English there as usual and press Enter; a small popup next to the chat box shows the Japanese, and Enter sends it. Ctrl+Enter (or a leading `\`) sends your English as typed.
+- Party Finder listings: right-click a listing's detail window and choose **Translate** to see its description in English in a popup next to the listing.
 - Translation runs through your own [OpenRouter](https://openrouter.ai) API key. The key is encrypted with Windows DPAPI for your user account before it is written to the config file.
 
 **Status: feature-complete for v1, pending in-game testing.** Chat capture, streamed translation, caching, the outgoing composer and sending are all implemented and unit-tested, but the plugin has not yet been run against a live game client. See [Known unverified](#known-unverified) below. The design is in [`docs/PLAN.md`](docs/PLAN.md).
@@ -121,6 +122,18 @@ The popup sits to the right of the chat box, bottom-aligned with it; if there is
 
 **ChatTwo**: ChatTwo sends through the same game function, so lines typed into ChatTwo's input are translated the same way.
 
+### Party Finder
+
+1. Open a listing in the Party Finder so its detail window (description, duty, recruiter) is showing.
+2. Right-click the detail window and choose **Translate** (it carries Dalamud's plugin-item prefix glyph).
+3. A popup opens to the right of the detail window (to its left if there is no room on the right) with the duty and recruiter, the original description, and the translation as it streams in.
+
+- **Copy** copies the translation to the clipboard. **Close** or **Esc** closes the popup. It also closes by itself when you close the detail window or open another listing, and translating another listing replaces its content.
+- A failed translation shows the error and a **Retry** button. A description without Japanese is shown as is, marked "not Japanese", and not sent to OpenRouter.
+- Auto-translate phrases in the description appear in `《》` brackets.
+- Every translated listing is also added to the log as a teal `[PF]` row (`21:05 [PF] duty · recruiter: description`). Translating the same listing again reuses its row, and repeated descriptions come from the cache. The **Channels** filter has a **Party Finder** entry to hide these rows.
+- **Settings > General** has **Add 'Translate' to the Party Finder right-click menu** and **Show Party Finder translations in a popup next to the listing**. With the popup off, the translation only goes to the log and the JP/EN chat window opens.
+
 ### Chat-bar button
 
 A small button (a "language" icon) sits on the game's chat tab bar, right of the last tab. Click it to open or close the JP/EN chat window. Its position can be adjusted with the offsets under **Show the log button on the chat tab bar** in **Settings > Vanilla chat** (with a Reset button), or the button can be hidden. It is hidden while the chat window or the game UI is hidden.
@@ -137,7 +150,7 @@ A small button (a "language" icon) sits on the game's chat tab bar, right of the
 
 | Tab | Contents |
 |---|---|
-| General | Font size, timestamps, maximum log lines, debounce (how long to wait for more lines from the same sender before translating them as one batch), default register |
+| General | Font size, timestamps, maximum log lines, debounce (how long to wait for more lines from the same sender before translating them as one batch), default register, Party Finder menu item and popup |
 | Translation | Incoming and outgoing model, fallback models, reasoning effort (empty = omit), concurrent requests, request timeout |
 | Vanilla chat | Translate English typed into the game's chat box, the send-untranslated modifier (Ctrl/Shift/Alt/none), the bypass prefix, popup position offsets, show/hide and position offsets of the chat-bar button |
 | Channels | Which chat channels are captured and translated |
@@ -150,8 +163,8 @@ You need an OpenRouter account with credits and an API key. Each translated line
 
 ## Privacy
 
-- Chat lines from the channels enabled in **Channels** that contain Japanese, the English you type into the input box, and English lines you type into the game's chat box while **Translate English typed into the game's chat box** is on, are sent to OpenRouter for translation. Requests ask OpenRouter to route only to providers that do not collect data (`provider.data_collection: "deny"`).
-- Sender names are not part of the request text. Nothing else leaves your machine: no telemetry, no other services.
+- Chat lines from the channels enabled in **Channels** that contain Japanese, the English you type into the input box, English lines you type into the game's chat box while **Translate English typed into the game's chat box** is on, and the description of a Party Finder listing when you click **Translate** on it, are sent to OpenRouter for translation. Requests ask OpenRouter to route only to providers that do not collect data (`provider.data_collection: "deny"`).
+- Sender names (and a listing's recruiter and duty) are not part of the request text. Nothing else leaves your machine: no telemetry, no other services.
 - The API key and the translation cache are stored in the plugin's config folder. The key is encrypted with DPAPI for your Windows account. Logs record request timing and sizes, never keys or message text above debug level.
 
 ## Known unverified
@@ -177,6 +190,8 @@ These depend on the live client and have not been checked in game yet:
 - Popup placement next to the chat box at different game UI scales and Dalamud global scales, and the switch to "above" near the right screen edge.
 - Chat-bar button placement (right end of the last chat tab) at different UI scales and tab counts.
 - The chat box's selected channel and tell target read from `RaptureShellModule` for the popup label and the log row when no prefix is typed.
+- Party Finder: the **Translate** item appears only in the listing detail window's right-click menu, with Dalamud's prefix glyph; the description, duty and recruiter read from `AddonLookingForGroupDetail` (`DescriptionString`, `DutyNameTextNode`, `PartyLeaderTextNode`) are the ones shown; auto-translate phrases appear as `《phrase》`.
+- Party Finder popup placement right of the detail window (left of it near the right screen edge) at different UI scales, and that it closes when the detail window closes or switches to another listing (and not while the same listing stays open).
 - The Novice Network command spellings (`/beginner`, `/n`, `/nn`, `/novice`) recognized as a channel prefix.
 
 ## Building

@@ -5,6 +5,7 @@ using Dalamud.Interface.Windowing;
 using Dalamud.Plugin;
 using JpEnChat.Chat;
 using JpEnChat.Models;
+using JpEnChat.PartyFinder;
 using JpEnChat.Translation;
 using JpEnChat.Ui;
 using JpEnChat.Windows;
@@ -29,6 +30,8 @@ public sealed class Plugin : IDalamudPlugin
     private readonly QuickTranslatePopup quickPopup;
     private readonly ChatBarButton chatBarButton;
     private readonly ChatIngest ingest;
+    private readonly PartyFinderPopup partyFinderPopup;
+    private readonly PartyFinderTranslator partyFinder;
 
     private uint cachedWorldId = uint.MaxValue;
     private string cachedWorldName = string.Empty;
@@ -53,9 +56,10 @@ public sealed class Plugin : IDalamudPlugin
         cache.Load();
         client = new OpenRouterClient(() => Configuration.OpenRouterKey, () => Configuration.RequestTimeoutSeconds, log);
         var translator = new OpenRouterTranslator(Configuration, client, log);
+        var detector = new ScriptLanguageDetector();
         pipeline = new TranslationPipeline(
             Configuration,
-            new ScriptLanguageDetector(),
+            detector,
             cache,
             translator,
             action => Services.Framework.RunOnFrameworkThread(action),
@@ -81,6 +85,9 @@ public sealed class Plugin : IDalamudPlugin
         quickPopup = new QuickTranslatePopup(Configuration, ChatLog, outgoingTranslator, SendChat, LocalPlayerName);
         chatBarButton = new ChatBarButton(Configuration, ToggleMainUi);
 
+        // Party Finder (PLAN §10): popup next to a listing's detail window.
+        partyFinderPopup = new PartyFinderPopup(Configuration, pipeline.Retry);
+
         windowSystem.AddWindow(mainWindow);
         windowSystem.AddWindow(configWindow);
 
@@ -96,6 +103,7 @@ public sealed class Plugin : IDalamudPlugin
 
         // Subscribe last, so no chat line arrives before everything it touches exists.
         ingest = new ChatIngest(Configuration, ChatLog, pipeline, log);
+        partyFinder = new PartyFinderTranslator(Configuration, ChatLog, pipeline, detector, partyFinderPopup, ShowMainUi, log);
         chatSendHook.OnIntercept = quickPopup.TryBegin;
     }
 
@@ -106,11 +114,13 @@ public sealed class Plugin : IDalamudPlugin
 
     public void Dispose()
     {
-        // Stop new lines first (ingest, then the chat-box hook so nothing more is intercepted), then the popup and the
-        // UI, then cancel in-flight translations (the pipeline saves the cache).
+        // Stop new lines first (ingest, the Party Finder context menu, then the chat-box hook so nothing more is
+        // intercepted), then the popups and the UI, then cancel in-flight translations (the pipeline saves the cache).
         ingest.Dispose();
+        partyFinder.Dispose();
         chatSendHook.Dispose();
         quickPopup.Dispose();
+        partyFinderPopup.Dispose();
 
         pluginInterface.UiBuilder.Draw -= OnDraw;
         pluginInterface.UiBuilder.OpenMainUi -= ToggleMainUi;
@@ -153,9 +163,16 @@ public sealed class Plugin : IDalamudPlugin
         windowSystem.Draw();
         chatBarButton.Draw();
         quickPopup.Draw();
+        partyFinderPopup.Draw();
     }
 
     private void ToggleMainUi() => mainWindow.Toggle();
+
+    private void ShowMainUi()
+    {
+        mainWindow.IsOpen = true;
+        mainWindow.BringToFront();
+    }
 
     private void ToggleConfigUi() => configWindow.Toggle();
 

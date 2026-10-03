@@ -38,6 +38,20 @@ public sealed class PipelineTests : IDisposable
 
     public void Dispose() => pipeline.Dispose();
 
+    private TranslationPipeline NewPipeline(int debounceMs) => new(
+        new Configuration { DebounceMs = debounceMs, MaxConcurrency = 2, CacheEnabled = true },
+        new ScriptLanguageDetector(),
+        cache,
+        translator,
+        action =>
+        {
+            lock (frameworkLock)
+            {
+                action();
+            }
+        },
+        log);
+
     private void Enqueue(ChatLine line)
     {
         lock (frameworkLock)
@@ -215,6 +229,56 @@ public sealed class PipelineTests : IDisposable
         var c = TestUtil.JaLine("後");
         Enqueue(c); // ignored after dispose
         Assert.Equal(TranslationStatus.None, c.Status);
+    }
+
+    [Fact]
+    public async Task EnqueueImmediateSkipsTheDebounce()
+    {
+        // A 10 s debounce: only a line that bypasses it can finish within the wait below.
+        using var slow = NewPipeline(debounceMs: 10_000);
+        var batched = TestUtil.JaLine("一");
+        var immediate = TestUtil.JaLine("二"); // same sender: must not join the pending batch
+        lock (frameworkLock)
+        {
+            slow.Enqueue(batched);
+            slow.EnqueueImmediate(immediate);
+            Assert.Equal(TranslationStatus.Pending, immediate.Status);
+        }
+
+        await TestUtil.WaitUntil(() => immediate.Status == TranslationStatus.Done, timeoutMs: 3000);
+        Assert.Equal("EN(二)", immediate.Translation);
+        Assert.Equal(TranslationStatus.Pending, batched.Status);
+        Assert.Equal(1, slow.PendingLineCount);
+        var batch = Assert.Single(translator.Batches);
+        Assert.Equal([immediate.Id], batch.Select(l => l.Id));
+        Assert.True(cache.TryGet("二", TranslationDirection.JaToEn, out _));
+    }
+
+    [Fact]
+    public async Task EnqueueImmediateUsesCacheAndLanguageGate()
+    {
+        var first = TestUtil.JaLine("募集");
+        lock (frameworkLock)
+        {
+            pipeline.EnqueueImmediate(first);
+        }
+
+        await TestUtil.WaitUntil(() => first.Status == TranslationStatus.Done);
+        var calls = translator.Batches.Count;
+
+        var again = TestUtil.JaLine("募集", sender: "Other");
+        var english = new ChatLine { Original = "LF healer, chill run", SenderName = "X" };
+        lock (frameworkLock)
+        {
+            pipeline.EnqueueImmediate(again);
+            pipeline.EnqueueImmediate(english);
+        }
+
+        Assert.Equal(TranslationStatus.CacheHit, again.Status); // synchronous
+        Assert.Equal("EN(募集)", again.Translation);
+        Assert.Equal(TranslationStatus.None, english.Status);
+        await Task.Delay(200);
+        Assert.Equal(calls, translator.Batches.Count);
     }
 
     [Fact]

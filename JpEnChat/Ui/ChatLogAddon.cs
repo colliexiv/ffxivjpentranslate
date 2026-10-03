@@ -21,18 +21,8 @@ internal static unsafe class ChatLogAddon
     /// <summary>Screen rectangle of the chat window (scaled), or false when it is missing or hidden.</summary>
     public static bool TryGetRect(out Vector2 position, out Vector2 size)
     {
-        position = default;
-        size = default;
         var addon = Services.GameGui.GetAddonByName<AddonChatLog>(AddonName);
-        if (addon == null || !addon->AtkUnitBase.IsVisible)
-        {
-            return false;
-        }
-
-        var unit = &addon->AtkUnitBase;
-        position = ImGuiHelpers.MainViewport.Pos + new Vector2(unit->X, unit->Y);
-        size = new Vector2(unit->GetScaledWidth(true), unit->GetScaledHeight(true));
-        return size.X > 0f && size.Y > 0f;
+        return AddonRect.TryGet(addon == null ? null : &addon->AtkUnitBase, out position, out size);
     }
 
     /// <summary>
