@@ -41,7 +41,7 @@ A Dalamud plugin for English speakers playing on Japanese data centers.
 - Every captured line appears immediately. The right cell shows `…` until the translation streams in. A failed request shows a clickable `retry`.
 - Lines without Japanese (for example English) get no translation.
 - **Channels** filters which channels are displayed (capture is unaffected). **Latest** jumps back to the bottom when you have scrolled up.
-- Hover a translation to see the full original.
+- Hover a translation to see the full original. Right-click a row to edit, copy, retry or pin its translation (see [Fixing translations](#fixing-translations)).
 - Lines you send through the plugin appear as their own row: English on the left, the Japanese you sent on the right.
 - Your own messages typed in the vanilla chat box are not captured, except outgoing tells. Lines sent through the chat-box popup are added as rows like the ones sent from the window.
 
@@ -134,6 +134,18 @@ The popup sits to the right of the chat box, bottom-aligned with it; if there is
 - Every translated listing is also added to the log as a teal `[PF]` row (`21:05 [PF] duty · recruiter: description`). Translating the same listing again reuses its row, and repeated descriptions come from the cache. The **Channels** filter has a **Party Finder** entry to hide these rows.
 - **Settings > General** has **Add 'Translate' to the Party Finder right-click menu** and **Show Party Finder translations in a popup next to the listing**. With the popup off, the translation only goes to the log and the JP/EN chat window opens.
 
+### Fixing translations
+
+When the model gets a message wrong (for example a lone `ノ`, the Japanese raised hand "o/", translated as a command), fix it once and it stays fixed.
+
+- **Right-click a row** in the log for **Edit translation…**, **Copy original**, **Copy translation**, **Retry** (failed rows) and **Pin as fixed translation** / **Unpin fixed translation**.
+- **Edit translation…** opens a small editor with the original and your translation. **Enter** (or **Ctrl+Enter**) or **Save** saves, **Esc** or **Cancel** cancels. The row shows a pencil mark and "(corrected by you)" on hover.
+- A saved correction becomes a **fixed translation**: the same message (ignoring trailing `！`, `ｗｗ`, `。` and width/spacing differences) always shows your text from then on, without asking the model. Fixed translations are never evicted from the cache, do not count toward its size limit, and survive **Clear cache**.
+- Correcting a row you sent (English left, Japanese right) fixes the **EN→JA** direction: typing that English again sends your Japanese directly, with "(your fixed translation; no request was made)" as the back-translation.
+- Fixed translations apply even to lines that are not detected as Japanese (`88` → "bye bye") and even with the cache turned off.
+- **Settings > Translations** lists the fixed translations (edit, unpin, delete, and an **Add** row with direction, original and translation) and the cached ones (search, edit, pin, delete, and **Clear cache**, which needs a second click and keeps fixed translations). Editing a cached translation pins it. A first install starts with a few fixed translations (`ノ` → o/, `ノシ` → o/ (bye), `88` → bye bye, `おつ`/`乙` → gg, `よろ` → hi, let's go, `おけ` → ok, `りょ` → roger); **Add defaults** restores any that are missing without touching your own.
+- **Settings > Glossary** takes free-form notes, one term per line (for example `ノ = o/ (raised hand)`), sent to the model with every request after the built-in glossary and with priority over it (up to 4,000 characters). Use it for terms and names in general; use a fixed translation for one exact message.
+
 ### Chat-bar button
 
 A small button (a "language" icon) sits on the game's chat tab bar, right of the last tab. Click it to open or close the JP/EN chat window. Its position can be adjusted with the offsets under **Show the log button on the chat tab bar** in **Settings > Vanilla chat** (with a Reset button), or the button can be hidden. It is hidden while the chat window or the game UI is hidden.
@@ -154,7 +166,8 @@ A small button (a "language" icon) sits on the game's chat tab bar, right of the
 | Translation | Incoming and outgoing model, fallback models, reasoning effort (empty = omit), concurrent requests, request timeout |
 | Vanilla chat | Translate English typed into the game's chat box, the send-untranslated modifier (Ctrl/Shift/Alt/none), the bypass prefix, popup position offsets, show/hide and position offsets of the chat-bar button |
 | Channels | Which chat channels are captured and translated |
-| Cache | Enable the translation cache, maximum entries, entry count, clear |
+| Translations | Enable the translation cache, maximum cached entries; fixed translations (list, edit, unpin, delete, add, add defaults); cached translations (search, edit, pin, delete, clear with confirmation) |
+| Glossary | Your own glossary notes, sent to the model after the built-in glossary |
 | Keys | OpenRouter API key (stored DPAPI-encrypted) and an optional second key reserved for later |
 
 ## Cost

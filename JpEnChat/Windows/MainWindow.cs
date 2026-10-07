@@ -11,6 +11,7 @@ using Dalamud.Interface.Utility;
 using Dalamud.Interface.Utility.Raii;
 using Dalamud.Interface.Windowing;
 using JpEnChat.Models;
+using JpEnChat.Translation;
 using JpEnChat.Ui;
 
 namespace JpEnChat.Windows;
@@ -47,7 +48,7 @@ public sealed class MainWindow : Window, IDisposable
     /// (e.g. <c>text =&gt; framework.RunOnFrameworkThread(() =&gt; chatSender.Send(text))</c>). A faulted task's
     /// message is shown in the panel.
     /// </param>
-    /// <param name="retry">Invoked when the user clicks "retry" on a failed row (on the draw thread).</param>
+    /// <param name="corrections">Retry, edit and pin actions of the log's rows (called on the draw thread).</param>
     /// <param name="currentWorld">Local player's current world name; the sender's world is shown only when it differs.</param>
     /// <param name="localPlayerName">Local player name for rows the plugin sent; empty when unknown.</param>
     /// <param name="openConfig">Opens the settings window.</param>
@@ -56,7 +57,7 @@ public sealed class MainWindow : Window, IDisposable
         ChatLog log,
         IOutgoingTranslator translator,
         Func<string, Task> send,
-        Action<ChatLine> retry,
+        ITranslationCorrections corrections,
         Func<string> currentWorld,
         Func<string> localPlayerName,
         Action openConfig)
@@ -67,7 +68,7 @@ public sealed class MainWindow : Window, IDisposable
         this.openConfig = openConfig;
 
         hiddenChannels = [.. configuration.HiddenLogChannels];
-        logView = new ChatLogView(log, configuration, hiddenChannels, currentWorld, retry);
+        logView = new ChatLogView(log, configuration, hiddenChannels, currentWorld, corrections);
         composer = new OutgoingComposer(configuration, log, translator, send, localPlayerName);
         font = new AxisFont(configuration);
 

@@ -7,6 +7,7 @@ using Dalamud.Interface;
 using Dalamud.Interface.Colors;
 using Dalamud.Interface.Utility.Raii;
 using JpEnChat.Models;
+using JpEnChat.Translation;
 
 namespace JpEnChat.Ui;
 
@@ -23,16 +24,25 @@ namespace JpEnChat.Ui;
 /// <para><b>Auto-scroll.</b> If the view was at the bottom before drawing, it is pinned to the bottom after drawing
 /// (this also follows a streaming translation that grows the last row). Otherwise new rows only light up the
 /// "jump to latest" button.</para>
+/// <para><b>Row menu.</b> Right-clicking either cell of a row opens a context menu (edit, copy, retry, pin/unpin;
+/// PLAN §11). Each drawn row pushes its line id onto the ID stack so the menu has one ID per row. "Edit translation…"
+/// opens the shared <see cref="TranslationEditor"/> modal, drawn at the end of <see cref="Draw"/> in the log child's ID
+/// scope. The resulting <see cref="ChatLine"/> mutations happen here on the draw thread, which in Dalamud is the
+/// framework thread, as the <see cref="ChatLine"/> threading contract requires.</para>
 /// </remarks>
 internal sealed class ChatLogView
 {
+    private const string RowMenuId = "##jpenRowMenu";
+
     private static readonly string WarningIcon = FontAwesomeIcon.ExclamationTriangle.ToIconString();
+    private static readonly string CorrectedIcon = FontAwesomeIcon.PencilAlt.ToIconString();
 
     private readonly ChatLog log;
     private readonly Configuration configuration;
     private readonly IReadOnlySet<XivChatType> hiddenChannels;
     private readonly Func<string> currentWorld;
-    private readonly Action<ChatLine> retry;
+    private readonly ITranslationCorrections corrections;
+    private readonly TranslationEditor editor = new();
 
     private readonly Dictionary<long, float> rowHeights = [];
     private readonly List<long> pruneBuffer = [];
@@ -46,13 +56,13 @@ internal sealed class ChatLogView
         Configuration configuration,
         IReadOnlySet<XivChatType> hiddenChannels,
         Func<string> currentWorld,
-        Action<ChatLine> retry)
+        ITranslationCorrections corrections)
     {
         this.log = log;
         this.configuration = configuration;
         this.hiddenChannels = hiddenChannels;
         this.currentWorld = currentWorld;
-        this.retry = retry;
+        this.corrections = corrections;
     }
 
     /// <summary>Whether the view was scrolled to the bottom at the end of the last drawn frame.</summary>
@@ -87,6 +97,7 @@ internal sealed class ChatLogView
         var viewBottom = atBottom ? float.MaxValue : scrollY + viewHeight + margin;
 
         DrawTable(lines, viewTop, viewBottom);
+        editor.Draw();
 
         if (atBottom || scrollToBottomRequested)
         {
@@ -181,9 +192,14 @@ internal sealed class ChatLogView
             var top = ImGui.GetCursorPosY();
             measure.RowStarted(top, line.Id);
 
-            DrawOriginal(line, world);
-            ImGui.TableNextColumn();
-            DrawTranslation(line);
+            using (ImRaii.PushId((nint)line.Id))
+            {
+                DrawOriginal(line, world);
+                ImGui.OpenPopupOnItemClick(RowMenuId, ImGuiPopupFlags.MouseButtonRight);
+                ImGui.TableNextColumn();
+                DrawTranslation(line);
+                DrawRowMenu(line);
+            }
 
             y = top + height;
         }
@@ -277,6 +293,25 @@ internal sealed class ChatLogView
                     DrawRetry(line);
                     break;
 
+                case TranslationStatus.Corrected:
+                    using (ImRaii.PushColor(ImGuiCol.Text, ImGui.GetColorU32(ImGuiCol.TextDisabled)))
+                    using (Services.PluginInterface.UiBuilder.IconFontHandle.Push())
+                    {
+                        ImGui.TextUnformatted(CorrectedIcon);
+                    }
+
+                    ImGui.SameLine();
+                    if (line.IsSentByPlugin)
+                    {
+                        ImGui.TextColoredWrapped(ChatChannels.SentColor, line.Translation);
+                    }
+                    else
+                    {
+                        ImGui.TextWrapped(line.Translation);
+                    }
+
+                    break;
+
                 default: // Streaming, Done, CacheHit
                     if (line.IsSentByPlugin)
                     {
@@ -291,9 +326,61 @@ internal sealed class ChatLogView
             }
         }
 
+        ImGui.OpenPopupOnItemClick(RowMenuId, ImGuiPopupFlags.MouseButtonRight);
         if (ImGui.IsItemHovered())
         {
             DrawRowTooltip(line, status);
+        }
+    }
+
+    /// <summary>The right-click menu of one row. Called inside the row's ID scope.</summary>
+    private void DrawRowMenu(ChatLine line)
+    {
+        using var menu = ImRaii.Popup(RowMenuId);
+        if (!menu.Success)
+        {
+            return;
+        }
+
+        var status = line.Status;
+        var hasTranslation = line.Translation.Length > 0;
+        if (status != TranslationStatus.None && ImGui.MenuItem("Edit translation…"))
+        {
+            var direction = TranslationPipeline.DirectionOf(line);
+            var note = direction == TranslationDirection.EnToJa
+                ? "Saved as a fixed EN→JA translation: this English will be sent as this Japanese."
+                : "Saved as a fixed translation: this message will always show this.";
+            editor.Open(line.Original, direction, line.Translation, note, text => corrections.Correct(line, text));
+        }
+
+        if (ImGui.MenuItem("Copy original"))
+        {
+            ImGui.SetClipboardText(line.Original);
+        }
+
+        if (ImGui.MenuItem("Copy translation", false, hasTranslation))
+        {
+            ImGui.SetClipboardText(line.Translation);
+        }
+
+        if (status == TranslationStatus.Failed && ImGui.MenuItem("Retry"))
+        {
+            corrections.Retry(line);
+        }
+
+        if (status is TranslationStatus.Done or TranslationStatus.CacheHit or TranslationStatus.Corrected && hasTranslation)
+        {
+            if (!corrections.IsPinned(line))
+            {
+                if (ImGui.MenuItem("Pin as fixed translation"))
+                {
+                    corrections.Pin(line);
+                }
+            }
+            else if (ImGui.MenuItem("Unpin fixed translation"))
+            {
+                corrections.Unpin(line);
+            }
         }
     }
 
@@ -306,13 +393,13 @@ internal sealed class ChatLogView
         }
 
         ImGui.SameLine();
-        if (ImGui.Selectable($"retry##retry{line.Id}"))
+        if (ImGui.Selectable("retry##retry"))
         {
-            retry(line);
+            corrections.Retry(line);
         }
     }
 
-    private static void DrawRowTooltip(ChatLine line, TranslationStatus status)
+    private void DrawRowTooltip(ChatLine line, TranslationStatus status)
     {
         using var tooltip = ImRaii.Tooltip();
         using var wrap = ImRaii.TextWrapPos(ImGui.GetFontSize() * 30f);
@@ -324,14 +411,20 @@ internal sealed class ChatLogView
             ImGui.TextColoredWrapped(ImGuiColors.DalamudRed, line.Error);
             ImGui.TextDisabled("Click retry to translate again.");
         }
+        else if (status == TranslationStatus.Corrected)
+        {
+            ImGui.TextDisabled("(corrected by you)");
+        }
         else if (status == TranslationStatus.CacheHit)
         {
-            ImGui.TextDisabled("(from cache)");
+            ImGui.TextDisabled(corrections.IsPinned(line) ? "(fixed translation)" : "(from cache)");
         }
         else if (line.IsSentByPlugin)
         {
             ImGui.TextDisabled("(sent by JP/EN Chat)");
         }
+
+        ImGui.TextDisabled("Right-click to edit, copy or pin.");
     }
 
     /// <summary>Records each row's height as the distance from its top to the next row's top.</summary>

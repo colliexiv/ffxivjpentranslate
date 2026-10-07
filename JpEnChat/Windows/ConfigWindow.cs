@@ -10,18 +10,21 @@ using Dalamud.Interface.Utility;
 using Dalamud.Interface.Utility.Raii;
 using Dalamud.Interface.Windowing;
 using JpEnChat.Models;
+using JpEnChat.Translation;
 using JpEnChat.Ui;
 
 namespace JpEnChat.Windows;
 
 /// <summary>
-/// Settings window: General, Translation, Vanilla chat, Channels, Cache and Keys tabs (PLAN §5, §9).
+/// Settings window: General, Translation, Vanilla chat, Channels, Translations, Glossary and Keys tabs (PLAN §5, §9, §11).
 /// </summary>
 /// <remarks>
 /// Toggles and combos save immediately. Sliders apply live (so the font size previews while dragging) and save when
 /// released. Free-text and numeric fields apply and save when the field loses focus, so a half-typed value (e.g. a
 /// log limit of "5") never takes effect. Every save raises <see cref="Changed"/>.
 /// API keys are decrypted into buffers only while the window is open and wiped on close.
+/// The Translations tab edits the translation cache directly (fixed and cached entries); every edit is followed by a
+/// background cache save. The Translations and Glossary tabs use the Axis font, so Japanese renders as in the log.
 /// </remarks>
 public sealed class ConfigWindow : Window, IDisposable
 {
@@ -42,9 +45,9 @@ public sealed class ConfigWindow : Window, IDisposable
     private static readonly string[] EffortLabels = ["low", "medium", "high", "none (omit)"];
 
     private readonly Configuration configuration;
-    private readonly Action clearCache;
-    private readonly Func<int> cacheEntryCount;
     private readonly Func<bool> chatHookInstalled;
+    private readonly TranslationsTab translationsTab;
+    private readonly AxisFont font;
 
     private static readonly string[] ModifierLabels = ["Ctrl", "Shift", "Alt", "None"];
     private static readonly BypassModifier[] ModifierValues =
@@ -56,24 +59,25 @@ public sealed class ConfigWindow : Window, IDisposable
     private int maxLogLinesBuffer;
     private int maxCacheEntriesBuffer;
     private List<XivChatType> channelChoices = [];
-    private string cacheStatus = string.Empty;
     private string bypassPrefixBuffer = string.Empty;
+    private string glossaryBuffer = string.Empty;
+    private string glossaryInfo = string.Empty;
 
     // Plaintext lives only while the window is open; decrypted on open, wiped on close.
     private readonly KeyEditor primaryKey;
     private readonly KeyEditor secondaryKey;
 
     /// <param name="configuration">Settings to edit; saved via <see cref="Configuration.Save"/>.</param>
-    /// <param name="clearCache">Clears the translation cache (Cache tab button).</param>
-    /// <param name="cacheEntryCount">Current number of cache entries, shown on the Cache tab.</param>
+    /// <param name="cache">Translation cache edited on the Translations tab (fixed and cached translations).</param>
+    /// <param name="saveCache">Saves the cache after an edit (off the draw thread).</param>
     /// <param name="chatHookInstalled">Whether the chat-box hook is installed (shown on the Vanilla chat tab).</param>
-    public ConfigWindow(Configuration configuration, Action clearCache, Func<int> cacheEntryCount, Func<bool> chatHookInstalled)
+    public ConfigWindow(Configuration configuration, ITranslationCache cache, Action saveCache, Func<bool> chatHookInstalled)
         : base("JP/EN Chat Settings###JpEnChatConfig", ImGuiWindowFlags.NoCollapse)
     {
         this.configuration = configuration;
-        this.clearCache = clearCache;
-        this.cacheEntryCount = cacheEntryCount;
         this.chatHookInstalled = chatHookInstalled;
+        translationsTab = new TranslationsTab(cache, saveCache);
+        font = new AxisFont(configuration);
 
         primaryKey = new KeyEditor(
             "OpenRouter API key",
@@ -101,6 +105,7 @@ public sealed class ConfigWindow : Window, IDisposable
     {
         primaryKey.Wipe();
         secondaryKey.Wipe();
+        font.Dispose();
     }
 
     public override void OnOpen()
@@ -114,8 +119,10 @@ public sealed class ConfigWindow : Window, IDisposable
             .Concat(configuration.EnabledChannels)
             .Distinct()
             .ToList();
-        cacheStatus = string.Empty;
         bypassPrefixBuffer = configuration.BypassPrefix;
+        glossaryBuffer = configuration.UserGlossary;
+        glossaryInfo = DescribeGlossary(glossaryBuffer);
+        translationsTab.Reset();
         primaryKey.Load();
         secondaryKey.Load();
     }
@@ -124,7 +131,7 @@ public sealed class ConfigWindow : Window, IDisposable
     {
         primaryKey.Wipe();
         secondaryKey.Wipe();
-        cacheStatus = string.Empty;
+        translationsTab.Reset();
     }
 
     public override void Draw()
@@ -139,7 +146,8 @@ public sealed class ConfigWindow : Window, IDisposable
         DrawTab("Translation", DrawTranslation);
         DrawTab("Vanilla chat", DrawVanillaChat);
         DrawTab("Channels", DrawChannels);
-        DrawTab("Cache", DrawCache);
+        DrawTab("Translations", DrawTranslations);
+        DrawTab("Glossary", DrawGlossary);
         DrawTab("Keys", DrawKeys);
     }
 
@@ -511,9 +519,9 @@ public sealed class ConfigWindow : Window, IDisposable
         }
     }
 
-    // ---- Cache ----
+    // ---- Translations (PLAN §3.2, §11) ----
 
-    private void DrawCache()
+    private void DrawTranslations()
     {
         var enabled = configuration.CacheEnabled;
         if (ImGui.Checkbox("Cache translations", ref enabled))
@@ -522,7 +530,10 @@ public sealed class ConfigWindow : Window, IDisposable
             Commit();
         }
 
-        ImGui.InputInt("Max entries", ref maxCacheEntriesBuffer, 0, 0);
+        ImGuiComponents.HelpMarker("Fixed translations apply even when the cache is off.");
+
+        ImGui.SetNextItemWidth(ImGui.GetFontSize() * 6f);
+        ImGui.InputInt("Max cached entries", ref maxCacheEntriesBuffer, 0, 0);
         if (ImGui.IsItemDeactivatedAfterEdit())
         {
             maxCacheEntriesBuffer = Math.Clamp(maxCacheEntriesBuffer, 100, 100000);
@@ -530,19 +541,66 @@ public sealed class ConfigWindow : Window, IDisposable
             Commit();
         }
 
-        ImGui.TextUnformatted($"Entries: {cacheEntryCount()}");
+        ImGuiComponents.HelpMarker("The oldest cached translations are dropped past this many. Fixed translations do not count.");
 
-        if (ImGui.Button("Clear cache"))
+        font.Ensure();
+        using (font.Push())
         {
-            clearCache();
-            cacheStatus = "Cache cleared.";
+            translationsTab.Draw();
+        }
+    }
+
+    // ---- Glossary (PLAN §11) ----
+
+    private void DrawGlossary()
+    {
+        ImGui.TextWrapped(
+            "One term per line, e.g. \"ノ = o/ (raised hand)\". These notes are sent to the model after the built-in glossary, "
+            + "with every incoming and outgoing request, and take priority over it.");
+        using (ImRaii.PushColor(ImGuiCol.Text, ImGui.GetColorU32(ImGuiCol.TextDisabled)))
+        {
+            ImGui.TextWrapped(
+                "For one exact message, a fixed translation (Translations tab, or right-click a row in the log) is cheaper and always applies.");
+        }
+        ImGui.Spacing();
+
+        font.Ensure();
+        using (font.Push())
+        {
+            if (glossaryBuffer.Length == 0)
+            {
+                ImGui.TextDisabled("Example:  ノ = o/ (raised hand)    竜騎士 = Dragoon (DRG)");
+            }
+
+            var height = Math.Max(ImGui.GetContentRegionAvail().Y - ImGui.GetTextLineHeightWithSpacing() * 2f, ImGui.GetTextLineHeightWithSpacing() * 6f);
+            if (ImGui.InputTextMultiline("##userGlossary", ref glossaryBuffer, Prompts.MaxUserGlossaryChars * 3, new Vector2(-1f, height)))
+            {
+                glossaryInfo = DescribeGlossary(glossaryBuffer);
+            }
+
+            if (ImGui.IsItemDeactivatedAfterEdit())
+            {
+                configuration.UserGlossary = glossaryBuffer;
+                Commit();
+            }
         }
 
-        if (cacheStatus.Length > 0)
+        ImGui.TextDisabled(glossaryInfo);
+    }
+
+    private static string DescribeGlossary(string text)
+    {
+        var sent = Prompts.CleanGlossary(text);
+        if (sent.Length == 0)
         {
-            ImGui.SameLine();
-            ImGui.TextDisabled(cacheStatus);
+            return "Empty: nothing is added to the prompt. Saved when the box loses focus.";
         }
+
+        var lines = sent.Count(c => c == '\n') + 1;
+        var all = string.Join('\n', text.Split('\n').Select(l => l.Trim()).Where(l => l.Length > 0));
+        var cut = all.Length > sent.Length;
+        return $"{lines} line(s), {sent.Length}/{Prompts.MaxUserGlossaryChars} characters sent"
+               + (cut ? " (cut: lines past the limit are not sent)" : string.Empty) + ". Saved when the box loses focus.";
     }
 
     // ---- Keys ----

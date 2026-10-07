@@ -1,4 +1,5 @@
 using System;
+using System.IO;
 using System.Threading.Tasks;
 using Dalamud.Game.Command;
 using Dalamud.Interface.Windowing;
@@ -53,7 +54,15 @@ public sealed class Plugin : IDalamudPlugin
         // Translation core (PLAN §3.2–3.3). The cache is loaded once here; the pipeline saves it periodically and on dispose.
         var log = new PluginLogAdapter(Services.Log);
         cache = new LruTranslationCache(pluginInterface.GetPluginConfigDirectory(), () => Configuration.MaxCacheEntries, log);
+        var firstRun = !File.Exists(cache.FilePath);
         cache.Load();
+        if (firstRun)
+        {
+            // Starter fixed translations (PLAN §11), only when there is no cache file yet; later via "Add defaults".
+            FixedTranslationDefaults.AddTo(cache);
+            cache.Save();
+        }
+
         client = new OpenRouterClient(() => Configuration.OpenRouterKey, () => Configuration.RequestTimeoutSeconds, log);
         var translator = new OpenRouterTranslator(Configuration, client, log);
         var detector = new ScriptLanguageDetector();
@@ -70,13 +79,13 @@ public sealed class Plugin : IDalamudPlugin
         chatSendHook = new ChatSendHook(Configuration, chatSender, log);
 
         var outgoingTranslator = new PipelineOutgoingTranslator(pipeline);
-        configWindow = new ConfigWindow(Configuration, cache.Clear, () => cache.Count, () => chatSendHook.IsInstalled);
+        configWindow = new ConfigWindow(Configuration, cache, pipeline.RequestCacheSave, () => chatSendHook.IsInstalled);
         mainWindow = new MainWindow(
             Configuration,
             ChatLog,
             outgoingTranslator,
             SendChat,
-            pipeline.Retry,
+            pipeline,
             CurrentWorldName,
             LocalPlayerName,
             OpenConfig);

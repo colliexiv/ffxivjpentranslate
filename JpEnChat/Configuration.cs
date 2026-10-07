@@ -71,10 +71,17 @@ public sealed class Configuration : IPluginConfiguration
     /// <summary>Default politeness for outgoing translations; one of <see cref="Registers"/>.</summary>
     public string DefaultRegister { get; set; } = Registers.Polite;
 
+    /// <summary>
+    /// The player's own glossary notes (Settings → Glossary), one per line, e.g. <c>ノ = o/ (raised hand)</c>. Appended
+    /// to the end of both system prompts when not blank (PLAN §11); see <see cref="Translation.Prompts.Incoming"/>.
+    /// </summary>
+    public string UserGlossary { get; set; } = string.Empty;
+
     // ---- Cache (PLAN §3.2) ----
 
     public bool CacheEnabled { get; set; } = true;
 
+    /// <summary>Capacity of the cache's unpinned entries. Fixed (pinned) translations are not counted.</summary>
     public int MaxCacheEntries { get; set; } = 2000;
 
     // ---- UI (PLAN §4) ----
@@ -207,6 +214,7 @@ public sealed class Configuration : IPluginConfiguration
         // No older schemas exist yet. Future: if (Version < 2) { ...; Version = 2; }
         // Fields added later in schema 1 load as their defaults; only values a hand-edit could break are repaired.
         BypassPrefix = NormalizeBypassPrefix(BypassPrefix);
+        UserGlossary ??= string.Empty;
         if (!Enum.IsDefined(BypassModifier))
         {
             BypassModifier = BypassModifier.Ctrl;

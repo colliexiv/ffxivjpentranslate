@@ -31,8 +31,15 @@ public enum TranslationStatus
     /// <summary>Request failed; see <see cref="ChatLine.Error"/>. UI offers a retry.</summary>
     Failed,
 
-    /// <summary>Filled instantly from the translation cache.</summary>
+    /// <summary>Filled instantly from the translation cache (including a fixed, pinned translation).</summary>
     CacheHit,
+
+    /// <summary>
+    /// The player replaced the translation by hand (log → right-click → Edit translation). Drawn like
+    /// <see cref="Done"/> with a pencil mark; the pipeline never overwrites it, because a late job only writes to
+    /// <see cref="Pending"/> and <see cref="Streaming"/> lines.
+    /// </summary>
+    Corrected,
 }
 
 /// <summary>

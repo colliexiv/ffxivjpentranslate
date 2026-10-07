@@ -26,13 +26,16 @@ namespace JpEnChat.Translation;
 /// <para><b>Concurrency.</b> <see cref="Configuration.MaxConcurrency"/> is read once at construction; a change
 /// takes effect on the next plugin load.</para>
 /// </remarks>
-public sealed class TranslationPipeline : IDisposable
+public sealed class TranslationPipeline : ITranslationCorrections, IDisposable
 {
     /// <summary>A batch with this many lines is sent without waiting for the debounce.</summary>
     public const int MaxBatchLines = 10;
 
     /// <summary>A batch waits at most this many debounce periods after its first line.</summary>
     public const int MaxWaitFactor = 3;
+
+    /// <summary>Back-translation text shown for an outgoing message answered by a fixed translation.</summary>
+    public const string FixedOutgoingNote = "(your fixed translation; no request was made)";
 
     /// <summary>Interval of the background cache save.</summary>
     public static readonly TimeSpan CacheSaveInterval = TimeSpan.FromSeconds(60);
@@ -175,13 +178,92 @@ public sealed class TranslationPipeline : IDisposable
         StartJob([line]);
     }
 
-    /// <summary>Outgoing EN→JA; not subject to the incoming concurrency limit. Cancelled on dispose as well as by <paramref name="ct"/>.</summary>
+    /// <summary>
+    /// Outgoing EN→JA; not subject to the incoming concurrency limit. Cancelled on dispose as well as by <paramref name="ct"/>.
+    /// A fixed (pinned) EN→JA translation of the English is returned as is, without a request.
+    /// </summary>
     public async Task<OutgoingDraft> TranslateOutgoingAsync(OutgoingDraft draft, CancellationToken ct)
     {
         ObjectDisposedException.ThrowIf(disposed, this);
+        ArgumentNullException.ThrowIfNull(draft);
+        if (draft.EnglishText.Trim().Length > 0
+            && cache.TryGetPinned(draft.EnglishText, TranslationDirection.EnToJa, out var fixedJa))
+        {
+            return draft with
+            {
+                JapaneseText = fixedJa,
+                Segments = [],
+                BackTranslation = FixedOutgoingNote,
+            };
+        }
+
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, shutdown);
         return await translator.TranslateOutgoingAsync(draft, linked.Token).ConfigureAwait(false);
     }
+
+    /// <summary>
+    /// Replaces a line's translation with the player's own text and pins it in the cache (PLAN §11), so the same
+    /// message gets this translation from now on. Incoming lines pin JA→EN (original → text); rows the plugin sent pin
+    /// EN→JA (the English draft → the Japanese text). Framework thread only; ImGui draw callbacks qualify, because
+    /// Dalamud runs them on the framework thread. Blank text is ignored. Saves the cache in the background.
+    /// </summary>
+    public void Correct(ChatLine line, string translation)
+    {
+        ArgumentNullException.ThrowIfNull(line);
+        ArgumentNullException.ThrowIfNull(translation);
+        var text = translation.Trim();
+        if (text.Length == 0 || line.Original.Trim().Length == 0)
+        {
+            return;
+        }
+
+        line.Translation = text;
+        line.Error = null;
+        line.Status = TranslationStatus.Corrected;
+        cache.Pin(line.Original, DirectionOf(line), text);
+        RequestCacheSave();
+    }
+
+    /// <summary>
+    /// Pins the line's current, finished translation as its fixed translation. Returns false when the line has none
+    /// (pending, streaming, failed or untranslated). Framework thread only.
+    /// </summary>
+    public bool Pin(ChatLine line)
+    {
+        ArgumentNullException.ThrowIfNull(line);
+        var text = line.Translation.Trim();
+        if (line.Status is not (TranslationStatus.Done or TranslationStatus.CacheHit or TranslationStatus.Corrected)
+            || text.Length == 0 || line.Original.Trim().Length == 0)
+        {
+            return false;
+        }
+
+        cache.Pin(line.Original, DirectionOf(line), text);
+        RequestCacheSave();
+        return true;
+    }
+
+    /// <summary>Unpins the line's fixed translation (it stays in the cache as an ordinary entry). Framework thread only.</summary>
+    public void Unpin(ChatLine line)
+    {
+        ArgumentNullException.ThrowIfNull(line);
+        cache.SetPinned(cache.CreateKey(line.Original, DirectionOf(line)), false);
+        RequestCacheSave();
+    }
+
+    /// <summary>Whether the line's source text has a fixed translation.</summary>
+    public bool IsPinned(ChatLine line)
+    {
+        ArgumentNullException.ThrowIfNull(line);
+        return line.Original.Length > 0 && cache.TryGetPinned(line.Original, DirectionOf(line), out _);
+    }
+
+    /// <summary>Cache direction of a log row: EN→JA for rows the plugin sent (English draft → Japanese), else JA→EN.</summary>
+    public static TranslationDirection DirectionOf(ChatLine line) =>
+        line.IsSentByPlugin ? TranslationDirection.EnToJa : TranslationDirection.JaToEn;
+
+    /// <summary>Writes the cache on a thread-pool thread if it changed (after an explicit edit, so it survives a crash).</summary>
+    public void RequestCacheSave() => _ = Task.Run(SaveCache);
 
     /// <summary>Short, user-facing text for a failed request (shown in the translation cell).</summary>
     public static string DescribeError(Exception ex) => ex switch
@@ -243,6 +325,10 @@ public sealed class TranslationPipeline : IDisposable
     /// <see cref="TranslationStatus.None"/>, cache hit → <see cref="TranslationStatus.CacheHit"/>, otherwise
     /// <see cref="TranslationStatus.Pending"/> and true (the caller queues the line).
     /// </summary>
+    /// <remarks>
+    /// Fixed (pinned) JA→EN translations apply even when <see cref="Configuration.CacheEnabled"/> is off, and even to a
+    /// line the detector does not call Japanese (so a rule such as <c>88</c> → "bye bye" works).
+    /// </remarks>
     private bool Admit(ChatLine line)
     {
         if (disposed)
@@ -253,11 +339,22 @@ public sealed class TranslationPipeline : IDisposable
         var lang = line.OriginalLang == Lang.Unknown ? detector.Detect(line.Original) : line.OriginalLang;
         if (lang != Lang.Ja)
         {
+            if (lang != Lang.Unknown && cache.TryGetPinned(line.Original, TranslationDirection.JaToEn, out var fixedEn))
+            {
+                line.Translation = fixedEn;
+                line.Error = null;
+                line.Status = TranslationStatus.CacheHit;
+                return false;
+            }
+
             line.Status = TranslationStatus.None;
             return false;
         }
 
-        if (config.CacheEnabled && cache.TryGet(line.Original, TranslationDirection.JaToEn, out var cached))
+        string? cached;
+        if (config.CacheEnabled
+                ? cache.TryGet(line.Original, TranslationDirection.JaToEn, out cached)
+                : cache.TryGetPinned(line.Original, TranslationDirection.JaToEn, out cached))
         {
             line.Translation = cached;
             line.Error = null;
@@ -383,6 +480,11 @@ public sealed class TranslationPipeline : IDisposable
         }
     }
 
+    /// <remarks>
+    /// Like the streaming and failure paths, only <see cref="TranslationStatus.Pending"/> and
+    /// <see cref="TranslationStatus.Streaming"/> lines are written, so a line the player corrected while its job was
+    /// in flight (<see cref="TranslationStatus.Corrected"/>) keeps the correction.
+    /// </remarks>
     private void CompleteLines(List<ChatLine> lines, IReadOnlyCollection<long> missing)
     {
         Post(() =>
@@ -407,6 +509,7 @@ public sealed class TranslationPipeline : IDisposable
                 line.Status = TranslationStatus.Done;
                 if (config.CacheEnabled)
                 {
+                    // Unpinned: if the player pinned this text meanwhile, the cache keeps their translation.
                     cache.Put(line.Original, TranslationDirection.JaToEn, text);
                 }
             }

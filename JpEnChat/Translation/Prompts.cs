@@ -2,7 +2,8 @@ namespace JpEnChat.Translation;
 
 /// <summary>
 /// System prompts. They are constants so every request carries a byte-identical prefix and provider-side prompt
-/// caching can engage (PLAN §3.3). Anything request-specific goes in the user message.
+/// caching can engage (PLAN §3.3). Anything request-specific goes in the user message;
+/// the only addition is the player's own glossary, appended at the very end (<see cref="Incoming"/>, <see cref="Outgoing"/>).
 /// </summary>
 /// <remarks>Changing these strings invalidates provider prompt caches once; it does not affect the local cache.</remarks>
 public static class Prompts
@@ -22,6 +23,7 @@ public static class Prompts
         - Keep numbers, waymarks and markers (A B C D 1 2 3 4, ①②③④, ▲ ● ■ ✕), emoticons, kaomoji, emoji and ♪ as they are.
         - Laughter "w", "ｗｗｗ" or "草" becomes "lol"; "ｗ" at the end of a sentence just marks a joking tone.
         - Keep the tone and politeness level, but prefer short game-chat English over formal English. Never explain or add anything that is not in the original.
+        - Never output slash commands, emote commands or anything starting with '/'. Never invent commands. Emoticons, kaomoji and ASCII-art faces are copied exactly as written.
         - Use the glossary below for FFXIV terms. Raid callouts should read like English raid callouts.
 
         Glossary (Japanese = English, FFXIV usage):
@@ -56,6 +58,16 @@ public static class Prompts
         離席 / 席外し = AFK / brb; 戻りました / ただいま = back
         了解 / りょ / 把握 / おけ = ok / got it
         お先に失礼します = I'm heading out, gg
+        お先です / お先 = heading out first, gg
+        ありがとうございました = thanks for the run
+        ノ = o/ (a raised hand: a wave or greeting; alone it can also mean "me!" / "I'm in")
+        ノシ = o/ (waving goodbye)
+        88 / バイバイ = bye
+        おやすみ / おやすみなさい = good night; おはよう / おはー / おはよー = morning; こんばんは / こんばんはー = evening
+        ナイス / ナイスヒール / ナイスタンク = nice / nice heals / nice tanking; いいね = nice
+        すご / すごい = wow; つよ / つよい = strong; かわいい = cute
+        泣 / 笑 at the end of a message = tone markers: (crying) / (lol)
+        ね / よね / ねー at the end of a sentence = friendly tone (right?); usually no extra English word
         FC = Free Company; LS = linkshell; CWLS = cross-world linkshell
         マケボ = market board; 金策 = making gil; ハウジング = housing; ミラプリ = glamour
         ジョブ = job; コンテンツ = duty / content; 装備 = gear; IL = item level
@@ -78,6 +90,7 @@ public static class Prompts
         - polite: friendly です/ます game-chat Japanese, as used with strangers in Party Finder and the Duty Finder (よろしくお願いします, お疲れ様でした).
         - casual: relaxed speech among friends (よろしく, おつかれー).
         Use the Japanese terms players actually type (1ボス, 散開, 頭割り, 零式, 野良, 固定, ロット, 練習, 初見, 解散). Keep player names, job and role abbreviations (PLD, WHM, MT, H1, D3), numbers, waymarks and anything inside «» [] <> unchanged. Never add content that is not in the English. Keep it to one chat line, at most 150 characters.
+        Never output slash commands, emote commands or anything starting with '/'. Never invent commands. Emoticons, kaomoji and ASCII-art faces are copied exactly as written; only a wave "o/" may be written ノ (ノシ when waving goodbye).
 
         Output JSON only, matching the schema:
         - ja: the Japanese message to send.
@@ -85,4 +98,70 @@ public static class Prompts
         - back: a literal English back-translation of ja, so the player can check the meaning.
         - register: the register you actually used.
         """;
+
+    /// <summary>Upper bound on the player glossary appended to a system prompt, in characters.</summary>
+    public const int MaxUserGlossaryChars = 4000;
+
+    /// <summary>Header of the player glossary section in <see cref="IncomingSystem"/>-based prompts.</summary>
+    public const string IncomingGlossaryHeader = "Player-defined glossary (highest priority; follow these exactly):";
+
+    /// <summary>Header of the player glossary section in <see cref="OutgoingSystem"/>-based prompts.</summary>
+    public const string OutgoingGlossaryHeader = "Player-defined glossary (use these preferred renderings when relevant):";
+
+    /// <summary>
+    /// <see cref="IncomingSystem"/> followed by the player's glossary (Settings → Glossary), when there is one. The glossary
+    /// goes last so the built-in prefix stays byte-identical and provider prompt caching still applies to it.
+    /// </summary>
+    public static string Incoming(string? userGlossary) => WithGlossary(IncomingSystem, IncomingGlossaryHeader, userGlossary);
+
+    /// <summary><see cref="OutgoingSystem"/> followed by the player's glossary, as for <see cref="Incoming"/>.</summary>
+    public static string Outgoing(string? userGlossary) => WithGlossary(OutgoingSystem, OutgoingGlossaryHeader, userGlossary);
+
+    /// <summary>
+    /// The glossary as sent: each line trimmed, blank lines dropped, cut to at most <see cref="MaxUserGlossaryChars"/>
+    /// characters at a line boundary (mid-line only when the first line alone is longer). Empty when nothing is left.
+    /// </summary>
+    public static string CleanGlossary(string? userGlossary)
+    {
+        if (string.IsNullOrWhiteSpace(userGlossary))
+        {
+            return string.Empty;
+        }
+
+        var sb = new System.Text.StringBuilder();
+        foreach (var raw in userGlossary.Split('\n'))
+        {
+            var line = raw.Trim();
+            if (line.Length == 0)
+            {
+                continue;
+            }
+
+            var needed = (sb.Length > 0 ? 1 : 0) + line.Length;
+            if (sb.Length + needed > MaxUserGlossaryChars)
+            {
+                if (sb.Length == 0)
+                {
+                    sb.Append(line, 0, MaxUserGlossaryChars);
+                }
+
+                break;
+            }
+
+            if (sb.Length > 0)
+            {
+                sb.Append('\n');
+            }
+
+            sb.Append(line);
+        }
+
+        return sb.ToString();
+    }
+
+    private static string WithGlossary(string prompt, string header, string? userGlossary)
+    {
+        var glossary = CleanGlossary(userGlossary);
+        return glossary.Length == 0 ? prompt : prompt + "\n\n" + header + "\n" + glossary;
+    }
 }

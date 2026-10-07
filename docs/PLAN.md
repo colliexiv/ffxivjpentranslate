@@ -556,3 +556,27 @@ Goal: translate a Party Finder listing's description on request, as ChatTranslat
   added and the main window is opened and brought to front), `PartyFinderHidden` (false, set from the log filter).
   Schema version stays 1. With the popup off, an empty description prints one line to chat with `IChatGui.Print`
   (the second chat print after `/jpchat auto`).
+
+## 11. Phase 6: corrections, fixed translations and the player glossary
+
+Trigger: a lone `ノ` (raised hand, "o/") came back as `/in`. Version 0.4.0.0.
+
+- **Pinned cache entries.** `LruTranslationCache` entries carry `Pinned` and an optional `Display` (the source as
+  typed). Pinned entries live in their own list: never evicted, not counted toward `MaxCacheEntries`, kept by `Clear()`
+  (`ClearAll()` removes them too), and an unpinned `Put` never replaces one. `cache.json` gains `"p":true` and
+  `"o":display` on such entries (both optional on load); pinned entries are written first. New API: `Put(key, text,
+  pinned, display)`, `TryGetEntry`, `Snapshot`, `Remove`, `SetPinned`, `ClearAll`, `Version`.
+- **Pipeline.** `Admit` serves a pinned JA→EN entry as `CacheHit` even with the cache off and even for lines the
+  detector does not call Japanese (`88`). `TranslateOutgoingAsync` answers from a pinned EN→JA entry without a request.
+  `Correct(line, text)` sets `TranslationStatus.Corrected` and pins (JA→EN for incoming rows, EN→JA for rows the plugin
+  sent); `Pin`, `Unpin`, `IsPinned` back the log menu (`ITranslationCorrections`). Late jobs only write to
+  Pending/Streaming lines, so a correction made mid-stream sticks. Explicit edits save the cache in the background.
+- **UI.** Log rows have a right-click menu (edit, copy original/translation, retry, pin/unpin) and a shared modal
+  editor (`Ui/TranslationEditor`: Enter or Ctrl+Enter saves, Esc cancels, single line, ≤ 2,000 characters). Settings:
+  the Cache tab became **Translations** (fixed list with an Add row and "Add defaults"; cached list with search,
+  `ImGuiListClipper`, edit/pin/delete, two-click Clear cache) and a new **Glossary** tab. Eight starter fixed
+  translations are added when `cache.json` does not exist yet.
+- **Prompts.** Both prompts forbid slash/emote commands and keep emoticons and kaomoji verbatim; the incoming glossary
+  gained common chat conventions (ノ, ノシ, 88, greetings, ナイス…, tone markers 泣/笑, ね/よね). The player glossary
+  (`Configuration.UserGlossary`, trimmed, blank lines dropped, ≤ 4,000 characters) is appended after the built-in
+  prompt, so the byte-identical prefix still benefits from provider prompt caching.

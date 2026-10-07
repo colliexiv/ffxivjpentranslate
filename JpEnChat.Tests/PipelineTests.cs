@@ -288,6 +288,174 @@ public sealed class PipelineTests : IDisposable
         Assert.Equal("JA(hi)", result.JapaneseText);
     }
 
+    private void OnFramework(Action action)
+    {
+        lock (frameworkLock)
+        {
+            action();
+        }
+    }
+
+    [Fact]
+    public async Task PinnedEntryIsCacheHitWithoutCallingTheTranslator()
+    {
+        cache.Pin("ノ", TranslationDirection.JaToEn, "o/");
+        var line = TestUtil.JaLine("ノ");
+        Enqueue(line);
+
+        Assert.Equal(TranslationStatus.CacheHit, line.Status); // synchronous
+        Assert.Equal("o/", line.Translation);
+        await Task.Delay(300);
+        Assert.Empty(translator.Batches);
+    }
+
+    [Fact]
+    public async Task PinnedEntryAppliesWhenTheCacheIsOff()
+    {
+        using var noCache = new TranslationPipeline(
+            new Configuration { DebounceMs = 50, MaxConcurrency = 2, CacheEnabled = false },
+            new ScriptLanguageDetector(),
+            cache,
+            translator,
+            OnFramework,
+            log);
+        cache.Put("一", TranslationDirection.JaToEn, "one");
+        cache.Pin("ノ", TranslationDirection.JaToEn, "o/");
+
+        var plain = TestUtil.JaLine("一");
+        var pinned = TestUtil.JaLine("ノ");
+        OnFramework(() =>
+        {
+            noCache.Enqueue(plain);
+            noCache.Enqueue(pinned);
+        });
+
+        Assert.Equal(TranslationStatus.Pending, plain.Status); // ordinary cache entries are ignored
+        Assert.Equal(TranslationStatus.CacheHit, pinned.Status);
+        Assert.Equal("o/", pinned.Translation);
+        await TestUtil.WaitUntil(() => plain.Status == TranslationStatus.Done);
+        Assert.DoesNotContain(translator.Batches.SelectMany(b => b), l => l.Id == pinned.Id);
+    }
+
+    [Fact]
+    public void PinnedRuleAppliesToLinesThatAreNotJapanese()
+    {
+        cache.Pin("88", TranslationDirection.JaToEn, "bye bye");
+        var bye = new ChatLine { Original = "88", SenderName = "X" }; // Lang.Other
+        var gg = new ChatLine { Original = "gg", OriginalLang = Lang.En, SenderName = "X" };
+        Enqueue(bye);
+        Enqueue(gg);
+
+        Assert.Equal(TranslationStatus.CacheHit, bye.Status);
+        Assert.Equal("bye bye", bye.Translation);
+        Assert.Equal(TranslationStatus.None, gg.Status);
+        Assert.Equal(0, pipeline.PendingLineCount);
+    }
+
+    [Fact]
+    public async Task CorrectionSticksWhenAStaleJobCompletes()
+    {
+        translator.Gate = new TaskCompletionSource();
+        var line = TestUtil.JaLine("練習");
+        Enqueue(line);
+        await TestUtil.WaitUntil(() => line.Status == TranslationStatus.Streaming);
+
+        OnFramework(() => pipeline.Correct(line, "  practice run\n "));
+        Assert.Equal(TranslationStatus.Corrected, line.Status);
+        Assert.Equal("practice run", line.Translation);
+
+        translator.Gate.SetResult();
+        await TestUtil.WaitUntil(() => pipeline.ActiveJobCount == 0);
+        await Task.Delay(50);
+
+        Assert.Equal(TranslationStatus.Corrected, line.Status);
+        Assert.Equal("practice run", line.Translation);
+        Assert.True(cache.TryGetEntry(cache.CreateKey("練習", TranslationDirection.JaToEn), out var entry));
+        Assert.True(entry.Pinned);
+        Assert.Equal("practice run", entry.Translation);
+        Assert.True(OnFrameworkGet(() => pipeline.IsPinned(line)));
+
+        var again = TestUtil.JaLine("練習！");
+        Enqueue(again);
+        Assert.Equal(TranslationStatus.CacheHit, again.Status);
+        Assert.Equal("practice run", again.Translation);
+    }
+
+    [Fact]
+    public async Task FinishedJobDoesNotOverwriteAPinMadeMeanwhile()
+    {
+        translator.Gate = new TaskCompletionSource();
+        var line = TestUtil.JaLine("初見");
+        Enqueue(line);
+        await TestUtil.WaitUntil(() => line.Status == TranslationStatus.Streaming);
+
+        cache.Pin("初見", TranslationDirection.JaToEn, "first time");
+        translator.Gate.SetResult();
+        await TestUtil.WaitUntil(() => line.Status == TranslationStatus.Done);
+
+        Assert.Equal("EN(初見)", line.Translation);
+        Assert.True(cache.TryGetPinned("初見", TranslationDirection.JaToEn, out var pinned));
+        Assert.Equal("first time", pinned);
+    }
+
+    [Fact]
+    public async Task PinAndUnpinFromALogRow()
+    {
+        var line = TestUtil.JaLine("散開");
+        Enqueue(line);
+        await TestUtil.WaitUntil(() => line.Status == TranslationStatus.Done);
+
+        Assert.False(OnFrameworkGet(() => pipeline.IsPinned(line)));
+        Assert.True(OnFrameworkGet(() => pipeline.Pin(line)));
+        Assert.True(cache.TryGetPinned("散開", TranslationDirection.JaToEn, out var pinned));
+        Assert.Equal("EN(散開)", pinned);
+
+        OnFramework(() => pipeline.Unpin(line));
+        Assert.False(OnFrameworkGet(() => pipeline.IsPinned(line)));
+        Assert.True(cache.TryGet("散開", TranslationDirection.JaToEn, out _)); // still cached
+
+        var pending = TestUtil.JaLine("頭割り");
+        pending.Status = TranslationStatus.Pending;
+        Assert.False(OnFrameworkGet(() => pipeline.Pin(pending)));
+    }
+
+    [Fact]
+    public async Task CorrectingASentRowPinsEnToJaAndOutgoingUsesIt()
+    {
+        var sent = new ChatLine
+        {
+            Original = "o/",
+            OriginalLang = Lang.En,
+            Translation = "/in",
+            Status = TranslationStatus.Done,
+            IsSentByPlugin = true,
+        };
+        OnFramework(() => pipeline.Correct(sent, "ノ"));
+
+        Assert.Equal(TranslationStatus.Corrected, sent.Status);
+        Assert.True(cache.TryGetPinned("O/", TranslationDirection.EnToJa, out var ja));
+        Assert.Equal("ノ", ja);
+        Assert.False(cache.TryGetPinned("o/", TranslationDirection.JaToEn, out _));
+
+        var result = await pipeline.TranslateOutgoingAsync(
+            new OutgoingDraft { EnglishText = "O/ ", ChannelPrefix = "/p " }, CancellationToken.None);
+        Assert.Equal("ノ", result.JapaneseText);
+        Assert.Equal(TranslationPipeline.FixedOutgoingNote, result.BackTranslation);
+        Assert.Empty(result.Segments);
+        Assert.Equal("/p ノ", result.ToChatCommand());
+
+        var other = await pipeline.TranslateOutgoingAsync(new OutgoingDraft { EnglishText = "hi" }, CancellationToken.None);
+        Assert.Equal("JA(hi)", other.JapaneseText); // no pin: the translator is asked
+    }
+
+    private T OnFrameworkGet<T>(Func<T> func)
+    {
+        lock (frameworkLock)
+        {
+            return func();
+        }
+    }
+
     /// <summary>Echo translator: streams "EN(" + text + ")" in two deltas per line.</summary>
     private sealed class FakeTranslator : ITranslator
     {

@@ -16,9 +16,10 @@ namespace JpEnChat.Translation;
 /// strict JSON-schema output for the outgoing EN→JA flow.
 /// </summary>
 /// <remarks>
-/// Reads <see cref="Configuration"/> on thread-pool threads. Only scalar properties and a defensive copy of
-/// <see cref="Configuration.FallbackModels"/> are read, so a concurrent edit in the config window can at worst
-/// apply one request late.
+/// Reads <see cref="Configuration"/> on thread-pool threads. Only scalar properties (strings included, such as
+/// <see cref="Configuration.UserGlossary"/>, which is appended to the system prompt by <see cref="Prompts.Incoming"/> and
+/// <see cref="Prompts.Outgoing"/>) and a defensive copy of <see cref="Configuration.FallbackModels"/> are read, so a
+/// concurrent edit in the config window can at worst apply one request late.
 /// </remarks>
 public sealed class OpenRouterTranslator : ITranslator
 {
@@ -143,7 +144,7 @@ public sealed class OpenRouterTranslator : ITranslator
         {
             Model = config.Model,
             FallbackModels = SnapshotFallbacks(),
-            SystemPrompt = Prompts.IncomingSystem,
+            SystemPrompt = Prompts.Incoming(config.UserGlossary),
             UserContent = BuildBatchUserContent(lines, target),
             Temperature = IncomingTemperature,
             MaxTokens = BatchMaxTokens(lines),
@@ -242,7 +243,7 @@ public sealed class OpenRouterTranslator : ITranslator
         var request = new ChatRequest
         {
             Model = config.OutgoingModel,
-            SystemPrompt = Prompts.OutgoingSystem,
+            SystemPrompt = Prompts.Outgoing(config.UserGlossary),
             UserContent = userContent,
             Temperature = OutgoingTemperature,
             MaxTokens = 4096,

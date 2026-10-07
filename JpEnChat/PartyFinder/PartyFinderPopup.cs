@@ -179,7 +179,7 @@ internal sealed class PartyFinderPopup : IDisposable
         DrawTranslation(translated);
         ImGui.Spacing();
 
-        var canCopy = translated.Status is TranslationStatus.Done or TranslationStatus.CacheHit
+        var canCopy = translated.Status is TranslationStatus.Done or TranslationStatus.CacheHit or TranslationStatus.Corrected
                       && translated.Translation.Length > 0;
         using (ImRaii.Disabled(!canCopy))
         {
@@ -226,11 +226,15 @@ internal sealed class PartyFinderPopup : IDisposable
 
                 break;
 
-            default: // Streaming, Done, CacheHit
+            default: // Streaming, Done, CacheHit, Corrected
                 ImGui.TextUnformatted(translated.Translation);
                 if (translated.Status == TranslationStatus.CacheHit)
                 {
                     ImGui.TextDisabled("(from cache)");
+                }
+                else if (translated.Status == TranslationStatus.Corrected)
+                {
+                    ImGui.TextDisabled("(corrected by you)");
                 }
 
                 break;
