@@ -121,7 +121,7 @@ internal sealed class QuickTranslatePopup : IDisposable
         notice = null;
         focusWindow = false;
         session.Reset();
-        session.SetStyle(configuration.DefaultStyle); // each message starts in the default style
+        session.SetStyle(configuration.DefaultStyle); // the last style the player picked (persisted below)
         session.StartTranslation(message.Body);
         open = true;
         return true;
@@ -196,6 +196,12 @@ internal sealed class QuickTranslatePopup : IDisposable
         }
 
         panel.Draw();
+        if (session.Style != configuration.DefaultStyle)
+        {
+            // A style picked in the popup becomes the default for the next message and is remembered across sessions.
+            configuration.DefaultStyle = session.Style;
+            configuration.Save();
+        }
 
         if (session.State is OutgoingState.Translating or OutgoingState.Confirming
             || (session.State == OutgoingState.Editing && session.Error != null))

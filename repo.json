@@ -3,7 +3,7 @@
     "Author": "colliexiv",
     "Name": "JP/EN Chat",
     "InternalName": "JpEnChat",
-    "AssemblyVersion": "0.5.1.0",
+    "AssemblyVersion": "0.5.2.0",
     "Description": "Shows chat in a two-pane window with the original Japanese on the left and a streamed English translation on the right, aligned row by row.\nType English into the game's chat box to get a Japanese translation (polite, casual, cool or your own persona) with a word-by-word breakdown and back-translation in a popup, confirm, and send.\nTranslation uses your own OpenRouter or Claude API key (chat lines in the channels you enable, with a little game context, are sent to the provider you choose). Early release.",
     "ApplicableVersion": "any",
     "RepoUrl": "https://github.com/colliexiv/ffxivjpentranslate",
