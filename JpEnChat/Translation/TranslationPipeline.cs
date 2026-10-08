@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
 using System.Net.Http;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using JpEnChat.Models;
@@ -453,7 +454,15 @@ public sealed class TranslationPipeline : ITranslationCorrections, IDisposable
         var firstDeltaTicks = 0L;
         try
         {
+            // Streaming text is accumulated here, on the (single) streaming thread, and every post to the framework
+            // thread carries a full snapshot plus a sequence number. Dalamud's RunOnFrameworkThread schedules each
+            // callback as an independent task continuation and does not preserve submission order, so appending
+            // deltas on the framework thread scrambled token-by-token streams (visible with Claude; Gemini's large
+            // chunks hid it). A snapshot with a stale sequence number is simply dropped.
             var byId = lines.ToDictionary(l => l.Id);
+            var buffers = lines.ToDictionary(l => l.Id, _ => new StringBuilder());
+            var applied = lines.ToDictionary(l => l.Id, _ => 0L); // framework thread only
+            var seq = 0L;
             var progress = new InlineProgress<(long LineId, string Delta)>(p =>
             {
                 if (p.Delta.Length == 0 || !byId.TryGetValue(p.LineId, out var line))
@@ -462,13 +471,20 @@ public sealed class TranslationPipeline : ITranslationCorrections, IDisposable
                 }
 
                 Interlocked.CompareExchange(ref firstDeltaTicks, Math.Max(1, sw.ElapsedTicks), 0);
-                var delta = p.Delta;
+                var snapshot = buffers[line.Id].Append(p.Delta).ToString();
+                var mySeq = ++seq;
                 Post(() =>
                 {
+                    if (applied[line.Id] >= mySeq)
+                    {
+                        return; // a later snapshot already landed
+                    }
+
+                    applied[line.Id] = mySeq;
                     if (line.Status is TranslationStatus.Pending or TranslationStatus.Streaming)
                     {
                         line.Status = TranslationStatus.Streaming;
-                        line.Translation += delta;
+                        line.Translation = snapshot;
                     }
                 });
             });
@@ -488,7 +504,8 @@ public sealed class TranslationPipeline : ITranslationCorrections, IDisposable
                 $"Translated {lines.Count} line(s) in {sw.ElapsedMilliseconds} ms " +
                 $"(first token {(ttft == 0 ? "n/a" : $"{ttft * 1000 / Stopwatch.Frequency} ms")}, model {config.ActiveIncomingModel}" +
                 $"{(missing.Count > 0 ? $", {missing.Count} missing" : string.Empty)}).");
-            CompleteLines(lines, missing);
+            var finalTexts = lines.ToDictionary(l => l.Id, l => buffers[l.Id].ToString().Trim());
+            CompleteLines(lines, missing, finalTexts, applied);
         }
         catch (OperationCanceledException) when (shutdown.IsCancellationRequested)
         {
@@ -522,18 +539,23 @@ public sealed class TranslationPipeline : ITranslationCorrections, IDisposable
     /// <see cref="TranslationStatus.Streaming"/> lines are written, so a line the player corrected while its job was
     /// in flight (<see cref="TranslationStatus.Corrected"/>) keeps the correction.
     /// </remarks>
-    private void CompleteLines(List<ChatLine> lines, IReadOnlyCollection<long> missing)
+    private void CompleteLines(
+        List<ChatLine> lines,
+        IReadOnlyCollection<long> missing,
+        IReadOnlyDictionary<long, string> finalTexts,
+        Dictionary<long, long> applied)
     {
         Post(() =>
         {
             foreach (var line in lines)
             {
+                applied[line.Id] = long.MaxValue; // no late delta snapshot may land after this
                 if (line.Status is not (TranslationStatus.Pending or TranslationStatus.Streaming))
                 {
                     continue;
                 }
 
-                var text = line.Translation.Trim();
+                var text = finalTexts[line.Id];
                 if (text.Length == 0 || missing.Contains(line.Id))
                 {
                     line.Status = TranslationStatus.Failed;

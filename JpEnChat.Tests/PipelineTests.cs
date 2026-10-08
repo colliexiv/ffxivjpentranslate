@@ -61,6 +61,47 @@ public sealed class PipelineTests : IDisposable
     }
 
     [Fact]
+    public async Task StreamedDeltasAppliedOutOfOrderStillProduceCorrectText()
+    {
+        // Dalamud's RunOnFrameworkThread does not preserve submission order; the pipeline must not depend on it.
+        var queued = new List<Action>();
+        using var p = new TranslationPipeline(
+            new Configuration { DebounceMs = 0, MaxConcurrency = 1, CacheEnabled = false },
+            new ScriptLanguageDetector(),
+            cache,
+            translator,
+            action =>
+            {
+                lock (queued)
+                {
+                    queued.Add(action);
+                }
+            },
+            log);
+
+        var line = TestUtil.JaLine("こんにちは");
+        p.Enqueue(line);
+        await TestUtil.WaitUntil(() =>
+        {
+            lock (queued)
+            {
+                return queued.Count >= 3 && p.ActiveJobCount == 0; // two deltas + completion
+            }
+        });
+
+        lock (queued)
+        {
+            for (var i = queued.Count - 1; i >= 0; i--)
+            {
+                queued[i]();
+            }
+        }
+
+        Assert.Equal(TranslationStatus.Done, line.Status);
+        Assert.Equal("EN(こんにちは)", line.Translation);
+    }
+
+    [Fact]
     public async Task SameSenderWithinDebounceIsOneBatch()
     {
         var a = TestUtil.JaLine("よろしくお願いします");
