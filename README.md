@@ -3,12 +3,13 @@
 A Dalamud plugin for English speakers playing on Japanese data centers.
 
 - A two-pane chat window: the original message on the left and its English translation on the right, one row per message. A slow translation stays on the same row as its original.
-- An English input box: type English, press Enter to get Japanese with a word-by-word breakdown and a back-translation, then press Enter again to send it.
-- Translation from the game's own chat box: type English there as usual and press Enter; a small popup next to the chat box shows the Japanese, and Enter sends it. Ctrl+Enter (or a leading `\`) sends your English as typed.
+- Translation from the game's own chat box: type English there as usual and press Enter; a small popup next to the chat box shows the Japanese with a word-by-word breakdown and a back-translation, and Enter sends it. Ctrl+Enter (or a leading `\`) sends your English as typed. Sending happens from the game's chat box only; the log window has no input row.
+- Four outgoing styles: Polite (丁寧語), Casual (タメ口), Cool (calm, composed, few words) and Custom (your own persona text).
 - Party Finder listings: right-click a listing's detail window and choose **Translate** to see its description in English in a popup next to the listing.
-- Translation runs through your own [OpenRouter](https://openrouter.ai) API key. The key is encrypted with Windows DPAPI for your user account before it is written to the config file.
+- Each request carries a little context (zone, duty, job, channel and the last few lines of the same conversation), so references like "the boss" and omitted subjects come out right.
+- Translation runs through your own API key, either [OpenRouter](https://openrouter.ai) or the Claude API directly (where Claude Max/Team monthly API credits apply). Keys are encrypted with Windows DPAPI for your user account before they are written to the config file.
 
-**Status: feature-complete for v1, pending in-game testing.** Chat capture, streamed translation, caching, the outgoing composer and sending are all implemented and unit-tested, but the plugin has not yet been run against a live game client. See [Known unverified](#known-unverified) below. The design is in [`docs/PLAN.md`](docs/PLAN.md).
+**Status:** chat capture, streamed translation, caching, the chat-box popup, Party Finder and corrections are verified in game (0.4.0). The Claude API provider, context and styles (0.5.0) are unit-tested and pending in-game verification; see [Known unverified](#known-unverified). The design is in [`docs/PLAN.md`](docs/PLAN.md).
 
 ## Installing from the custom repository
 
@@ -16,7 +17,7 @@ A Dalamud plugin for English speakers playing on Japanese data centers.
 2. Under **Custom Plugin Repositories**, add
    `https://raw.githubusercontent.com/colliexiv/ffxivjpentranslate/claude/dalamud-ffxiv-translation-plugin-66t6li/repo.json`, tick **Enabled**, and click **Save**.
 3. Run `/xlplugins`, search for **JP/EN Chat** and install it.
-4. Run `/jpchat config`, open the **Keys** tab and paste your OpenRouter API key.
+4. Run `/jpchat config`, open the **Keys** tab and paste your OpenRouter or Anthropic API key, then pick the matching **Provider** on the **Translation** tab (see [Providers](#providers)).
 
 `repo.json` points at `releases/latest/download/latest.zip`, so it always installs the newest GitHub release.
 
@@ -31,63 +32,26 @@ A Dalamud plugin for English speakers playing on Japanese data centers.
 │ │ 21:03 [P] Tanaka: よろしく   │ Nice to meet you       │  │  log
 │ │ 21:03 [P] Suzuki: 1ボス行きます│ …                      │  │
 │ └─────────────────────────────┴───────────────────────┘  │
-│ 1ボスいきましょう            (editable Japanese)          │  breakdown panel
-│   1ボス = first boss · いきましょう = let's go            │  (only while confirming)
-│   back: "Let's go to the first boss."  ○polite ○casual   │
-│ [Party ▾] [ let's pull the first boss          ] 42/500  │  input row
 └──────────────────────────────────────────────────────────┘
 ```
+
+The window is a log only. To talk, type in the game's own chat box (see below). `/jpchat` or the chat-bar button opens and closes it.
 
 - Every captured line appears immediately. The right cell shows `…` until the translation streams in. A failed request shows a clickable `retry`.
 - Lines without Japanese (for example English) get no translation.
 - **Channels** filters which channels are displayed (capture is unaffected). **Latest** jumps back to the bottom when you have scrolled up.
 - Hover a translation to see the full original. Right-click a row to edit, copy, retry or pin its translation (see [Fixing translations](#fixing-translations)).
-- Lines you send through the plugin appear as their own row: English on the left, the Japanese you sent on the right.
-- Your own messages typed in the vanilla chat box are not captured, except outgoing tells. Lines sent through the chat-box popup are added as rows like the ones sent from the window.
+- Lines you send through the chat-box popup appear as their own row: English on the left, the Japanese you sent on the right.
+- Your own messages typed in the vanilla chat box are not captured otherwise, except outgoing tells.
 
-### Keys
-
-"EN box" is the English input on the bottom row. "JA box" is the editable Japanese in the breakdown panel.
-
-| State | Key | Action |
-|---|---|---|
-| Editing | Enter in EN box | Translate (a typed channel prefix such as `/p` is applied first) |
-| Editing | Enter on an empty EN box | Return keyboard focus to the game |
-| Editing | Esc | Dismiss the last error |
-| Translating | Enter in EN box | Re-translate if the English changed, otherwise ignored |
-| Translating | Esc | Cancel the request and keep the English |
-| Confirming | Enter or Ctrl+Enter in JA box | Send the Japanese as edited |
-| Confirming | Enter in EN box | Send if the English is unchanged; re-translate if it changed |
-| Confirming | Ctrl+Enter in EN box | Send the current Japanese without re-translating |
-| Confirming | Esc | Discard the translation and keep the English |
-| Confirming | polite / casual | Re-translate with that register |
-| Sending | any | Ignored until the send completes |
-
-### Channels
-
-Pick the channel in the combo next to the input, or type a prefix at the start of the English text:
-
-| Prefix | Channel |
-|---|---|
-| `/s`, `/say` | Say |
-| `/sh`, `/shout` | Shout |
-| `/y`, `/yell` | Yell |
-| `/p`, `/party` | Party |
-| `/a`, `/alliance` | Alliance |
-| `/fc`, `/freecompany` | Free Company |
-| `/l1`–`/l8`, `/linkshell1`–`/linkshell8` | Linkshells |
-| `/cwl1`–`/cwl8`, `/cwlinkshell1`–`/cwlinkshell8` | Cross-world linkshells |
-| `/t First Last@World`, `/tell …` | Tell |
-| `/e`, `/echo` | Echo (only you see it; useful for testing) |
-
-One chat line is at most 500 UTF-8 bytes (about 166 Japanese characters) including the prefix. The counter next to the input shows the current size, and sending is blocked when it is over.
+One chat line is at most 500 UTF-8 bytes (about 166 Japanese characters) including the prefix. The popup shows the current size next to the Japanese, and sending is blocked when it is over.
 
 ### Translating from the game's chat box
 
 You do not have to use the plugin window to talk. With **Translate English typed into the game's chat box** on (the default), the plugin watches what the game's own chat box sends:
 
 1. Type English in the normal chat box and press **Enter**. Instead of being sent, the line is held back and a small popup opens next to the chat box with the translation.
-2. Check the Japanese (it is editable, with the same breakdown, back-translation and polite/casual toggle as the main window) and press **Enter** to send it.
+2. Check the Japanese (it is editable, with a word-by-word breakdown, a back-translation and the style selector) and press **Enter** to send it.
 
 Only plain English chat is held back (lines run by a macro never are). Everything else is sent exactly as the game would send it: Japanese, commands such as `/dance`, `/wave` or `/xlplugins`, `/e` echo, lines that are only a link, a number or symbols, and lines containing item links or auto-translate phrases.
 
@@ -112,7 +76,7 @@ Popup keys:
 | Confirming | Enter or Ctrl+Enter | Send the Japanese (with your channel prefix, if you typed one) |
 | Confirming | Shift+Enter, **Send English** | Send your line unchanged |
 | Confirming | Esc, **Cancel** | Discard, close, and restore your English as above |
-| Confirming | polite / casual | Re-translate with that register |
+| Confirming | Polite / Casual / Cool / Custom | Re-translate in that style |
 | Error shown | Esc | Close and restore your English as above |
 | Sending | any | Ignored until the send completes |
 
@@ -122,6 +86,48 @@ The popup sits to the right of the chat box, bottom-aligned with it; if there is
 
 **ChatTwo**: ChatTwo sends through the same game function, so lines typed into ChatTwo's input are translated the same way.
 
+### Providers
+
+**Settings > Translation > Provider** chooses where translations go. Switching applies to the next request.
+
+| | OpenRouter (default) | Anthropic (Claude API) |
+|---|---|---|
+| Key | [openrouter.ai](https://openrouter.ai) → Keys | [console.anthropic.com](https://console.anthropic.com) → API keys |
+| Models | any OpenRouter model (Gemini Flash by default; `anthropic/claude-haiku-5.5`, `-sonnet-5.5`, `-opus-5.5` are presets) | `claude-haiku-5-5` (incoming default), `claude-sonnet-5-5` (outgoing default), `claude-opus-5-5` |
+| Billing | OpenRouter credits | Claude API usage; **Max/Team monthly API credits apply only here** |
+
+To spend your plan's monthly API credits: create a key in the Claude Console, link the Console organization to your plan in claude.ai → **Settings → Billing**, paste the key into **Settings > Keys > Anthropic API key**, and set **Provider** to **Anthropic**.
+
+With the Claude API:
+
+- Incoming batches use the incoming model (default Haiku 5.5, $0.10/$0.50 per million input/output tokens) with effort `low`; outgoing messages use the outgoing model (default Sonnet 5.5, $2/$10) with a configurable effort (default `medium`). Opus 5.5 is $4/$20.
+- The built-in system prompt is prompt-cached (cache reads cost a tenth of normal input), so the large glossary is cheap after the first request in a few minutes. Your own glossary is sent outside the cached part. `/xllog` shows `cache_read_input_tokens` / `cache_creation_input_tokens` per response.
+- For Sonnet 5.5 and Opus 5.5, **Retry refusals on Anthropic's fallback model** (on by default) lets the API re-run a request a safety classifier declines on Anthropic's recommended fallback model. A declined request otherwise shows `refused`.
+
+### Styles
+
+The Japanese you send can sound four ways. **Settings > General > Outgoing style** sets the one the popup starts in; the popup's selector switches per message and re-translates.
+
+| Style | Sounds like |
+|---|---|
+| Polite (default) | 丁寧語: friendly です/ます, as with strangers in Party Finder |
+| Casual | タメ口 among friends and FC mates |
+| Cool | Calm, composed and concise; polite-leaning but not stiff, short sentences, particles used lightly, no exclamation spam. "let's go" → 行こうか。, "thanks, nice heals" → ありがとう。いいヒールだったね。 |
+| Custom | Your own persona from **Settings > General > Custom persona**, e.g. "speak like a cheerful Lalafell" (up to 500 characters; empty falls back to Polite) |
+
+### Context
+
+To resolve references ("the boss", "that one", omitted subjects) and keep terms consistent, every request carries a short context block in its user message:
+
+```
+Context (do not translate): zone=Kugane; duty=none; my job=WHM; channel=Party
+Recent lines:
+Tanaka: 1ボス行きます → heading to boss 1
+```
+
+- **Zone** and **duty** (while in a duty) come from the game's territory data; **job** is your current job abbreviation; **channel** is the channel of the message.
+- **Recent lines** are the last few lines of the same channel (for tells, the same tell partner) from the log, with their translations when known, each cut to 120 characters. Your own lines are labelled `Me`. **Settings > Translation > Context lines** sets how many (default 6, 0–15; 0 sends none).
+
 ### Party Finder
 
 1. Open a listing in the Party Finder so its detail window (description, duty, recruiter) is showing.
@@ -129,7 +135,7 @@ The popup sits to the right of the chat box, bottom-aligned with it; if there is
 3. A popup opens to the right of the detail window (to its left if there is no room on the right) with the duty and recruiter, the original description, and the translation as it streams in.
 
 - **Copy** copies the translation to the clipboard. **Close** or **Esc** closes the popup. It also closes by itself when you close the detail window or open another listing, and translating another listing replaces its content.
-- A failed translation shows the error and a **Retry** button. A description without Japanese is shown as is, marked "not Japanese", and not sent to OpenRouter.
+- A failed translation shows the error and a **Retry** button. A description without Japanese is shown as is, marked "not Japanese", and not sent to the provider.
 - Auto-translate phrases in the description appear in `《》` brackets.
 - Every translated listing is also added to the log as a teal `[PF]` row (`21:05 [PF] duty · recruiter: description`). Translating the same listing again reuses its row, and repeated descriptions come from the cache. The **Channels** filter has a **Party Finder** entry to hide these rows.
 - **Settings > General** has **Add 'Translate' to the Party Finder right-click menu** and **Show Party Finder translations in a popup next to the listing**. With the popup off, the translation only goes to the log and the JP/EN chat window opens.
@@ -162,27 +168,32 @@ A small button (a "language" icon) sits on the game's chat tab bar, right of the
 
 | Tab | Contents |
 |---|---|
-| General | Font size, timestamps, maximum log lines, debounce (how long to wait for more lines from the same sender before translating them as one batch), default register, Party Finder menu item and popup |
-| Translation | Incoming and outgoing model, fallback models, reasoning effort (empty = omit), concurrent requests, request timeout |
+| General | Font size, timestamps, maximum log lines, debounce (how long to wait for more lines from the same sender before translating them as one batch), outgoing style and custom persona, Party Finder menu item and popup |
+| Translation | Provider; OpenRouter: incoming and outgoing model, fallback models, reasoning effort (empty = omit); Anthropic: incoming and outgoing model, outgoing effort, refusal fallback; context lines, concurrent requests, request timeout |
 | Vanilla chat | Translate English typed into the game's chat box, the send-untranslated modifier (Ctrl/Shift/Alt/none), the bypass prefix, popup position offsets, show/hide and position offsets of the chat-bar button |
 | Channels | Which chat channels are captured and translated |
 | Translations | Enable the translation cache, maximum cached entries; fixed translations (list, edit, unpin, delete, add, add defaults); cached translations (search, edit, pin, delete, clear with confirmation) |
 | Glossary | Your own glossary notes, sent to the model after the built-in glossary |
-| Keys | OpenRouter API key (stored DPAPI-encrypted) and an optional second key reserved for later |
+| Keys | OpenRouter API key, Anthropic API key (both stored DPAPI-encrypted) and an optional second key reserved for later |
 
 ## Cost
 
-You need an OpenRouter account with credits and an API key. Each translated line is billed by OpenRouter at the model's token price. With the default `google/gemini-3.8-flash`, an evening of about 2,000 Japanese lines costs roughly $0.30. A cheaper model such as `google/gemini-2.5-flash-lite` costs under $0.05 for the same amount. Repeated lines (greetings, macros) are served from the local cache and cost nothing. You can set a credit limit on the key in OpenRouter's settings.
+You need an API key with credits: OpenRouter, or the Claude API (where Max/Team monthly API credits apply). Each translated line is billed at the model's token price. With the Claude API, the default Haiku 5.5 for incoming chat is $0.10/$0.50 per million tokens and most of each prompt is a cache read, so an evening of chat costs cents; outgoing messages on Sonnet 5.5 cost more per message but are few. On OpenRouter, with the default `google/gemini-3.8-flash`, an evening of about 2,000 Japanese lines costs roughly $0.30. A cheaper model such as `google/gemini-2.5-flash-lite` costs under $0.05 for the same amount. Repeated lines (greetings, macros) are served from the local cache and cost nothing. You can set a credit limit on the key in OpenRouter's settings.
 
 ## Privacy
 
-- Chat lines from the channels enabled in **Channels** that contain Japanese, the English you type into the input box, English lines you type into the game's chat box while **Translate English typed into the game's chat box** is on, and the description of a Party Finder listing when you click **Translate** on it, are sent to OpenRouter for translation. Requests ask OpenRouter to route only to providers that do not collect data (`provider.data_collection: "deny"`).
-- Sender names (and a listing's recruiter and duty) are not part of the request text. Nothing else leaves your machine: no telemetry, no other services.
-- The API key and the translation cache are stored in the plugin's config folder. The key is encrypted with DPAPI for your Windows account. Logs record request timing and sizes, never keys or message text above debug level.
+- Sent to the selected provider (OpenRouter or Anthropic) for translation: chat lines from the channels enabled in **Channels** that contain Japanese, English lines you type into the game's chat box while **Translate English typed into the game's chat box** is on, and the description of a Party Finder listing when you click **Translate** on it. OpenRouter requests ask to route only to providers that do not collect data (`provider.data_collection: "deny"`).
+- With each request goes a context block: your current zone, duty (while in one), job abbreviation and the channel, plus up to **Context lines** recent lines of the same channel or tell conversation with the **names of their senders** and their translations. Set **Context lines** to 0 to send no recent lines; the zone/duty/job line is always sent.
+- The names of the senders of the lines being translated are not part of the request. Nothing else leaves your machine: no telemetry, no other services.
+- The API keys and the translation cache are stored in the plugin's config folder. Keys are encrypted with DPAPI for your Windows account. Logs record request timing, token usage and sizes, never keys or message text above debug level.
 
 ## Known unverified
 
-These depend on the live client and have not been checked in game yet:
+These depend on the live client or the live Claude API and have not been checked yet:
+
+- Claude API (0.5.0): streaming with Haiku 5.5 at effort `low`; the outgoing structured output (`output_config.format`) on Sonnet 5.5; `cache_read_input_tokens` > 0 from the second request on (the outgoing prompt is short and may be below the cache minimum); `fallbacks: "default"` accepted with its beta header; error texts (`bad key`, `429 rate limited`, `refused`).
+- Context (0.5.0): zone, duty and job names read from the game (`TerritoryType` → `PlaceName` / `ContentFinderCondition`, `ClassJob` abbreviation) in town, in a duty and after a job change.
+- Styles (0.5.0): the four-way selector in the popup re-translates; how the Cool and Custom styles read to Japanese players.
 
 - Sending: `ProcessChatBoxEntry` with the `0x27F` sanitizer flags accepts Japanese text unchanged on a JP client (if not, every send fails safely with "characters the chat box does not allow").
 - The tell echo: a tell sent through the plugin is logged once, not twice; tells typed in the vanilla chat box show up with the target as the sender.
@@ -191,9 +202,6 @@ These depend on the live client and have not been checked in game yet:
 - Auto-translate phrases, item links and map links in the original text.
 - Font sizes: the Axis font at each size from 10 to 24 px, including Japanese glyphs.
 - Log clipping: row heights and scrolling with long logs and wrapped rows.
-- Esc handling in the input boxes and with the window focused.
-- IME input: confirming an IME composition with Enter must not also trigger a translation or send.
-- Height of the breakdown panel on its first frame (it is measured, so the first frame may jump).
 - Chat-box hook address: which of the two candidates matched. At plugin load `/xllog` shows `[JpEnChat] chat input hook: ExecuteCommandInner=…, chat-box call target=…` and then the address hooked; the two should be equal. If they differ the plugin hooks the chat-box call target and logs a warning; if neither is found it logs a warning and works without the feature.
 - Lines run by a game macro are never held (detected by `RaptureShellModule.MacroCurrentLine`, assumed negative when no macro is running).
 - On an intercepted line the game has already cleared its input box (the original function is not called).

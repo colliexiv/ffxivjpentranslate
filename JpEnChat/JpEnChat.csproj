@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <Project Sdk="Dalamud.NET.Sdk/15.0.0">
   <PropertyGroup>
-    <Version>0.4.0.0</Version>
+    <Version>0.5.0.0</Version>
     <AssemblyName>JpEnChat</AssemblyName>
     <RootNamespace>JpEnChat</RootNamespace>
     <Nullable>enable</Nullable>
@@ -13,8 +13,8 @@
     <Author>colliexiv</Author>
     <Punchline>Two-pane JP/EN chat translation for English players on Japanese data centers.</Punchline>
     <Description>Shows chat in a two-pane window with the original Japanese on the left and a streamed English translation on the right, aligned row by row.
-Type English into the input box to get a Japanese translation with a word-by-word breakdown and back-translation, confirm, and send.
-Translation uses your own OpenRouter API key (chat lines in the channels you enable are sent to OpenRouter). Early release.</Description>
+Type English into the game's chat box to get a Japanese translation (polite, casual, cool or your own persona) with a word-by-word breakdown and back-translation in a popup, confirm, and send.
+Translation uses your own OpenRouter or Claude API key (chat lines in the channels you enable, with a little game context, are sent to the provider you choose). Early release.</Description>
     <RepoUrl>https://github.com/colliexiv/ffxivjpentranslate</RepoUrl>
     <Tags>chat;translation;japanese;english</Tags>
   </PropertyGroup>

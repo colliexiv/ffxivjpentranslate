@@ -15,7 +15,7 @@ namespace JpEnChat.Chat;
 /// shell's chat-input processor that handles plain chat text and commands alike (the game's chat box calls that function
 /// directly on Enter). Because <see cref="ChatSendHook"/> hooks that function, every send here re-enters its detour on
 /// this thread; <see cref="ChatSendHook.SendBypassingHook"/> sets its bypass flag around this call.</para>
-/// <para>Only called after an explicit user confirmation (second Enter in the composer). Never sends automatically.</para>
+/// <para>Only called after an explicit user confirmation (Enter in the quick-translate popup). Never sends automatically.</para>
 /// </remarks>
 public sealed unsafe class GameChatSender : IChatSender
 {

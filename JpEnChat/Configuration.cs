@@ -4,6 +4,7 @@ using Dalamud.Configuration;
 using Dalamud.Game.Text;
 using JpEnChat.Models;
 using JpEnChat.Security;
+using JpEnChat.Translation;
 using Newtonsoft.Json;
 
 namespace JpEnChat;
@@ -31,7 +32,7 @@ public enum BypassModifier
 public sealed class Configuration : IPluginConfiguration
 {
     /// <summary>Schema version written by this build. Bump and migrate in <see cref="Migrate"/> on breaking changes.</summary>
-    public const int CurrentVersion = 1;
+    public const int CurrentVersion = 2;
 
     public int Version { get; set; } = CurrentVersion;
 
@@ -44,7 +45,10 @@ public sealed class Configuration : IPluginConfiguration
     /// <summary>Per-sender debounce window used to merge macro bursts into one request (PLAN §3.2).</summary>
     public int DebounceMs { get; set; } = 300;
 
-    // ---- Translator (PLAN §3.3, §8) ----
+    // ---- Translator (PLAN §3.3, §8, §12) ----
+
+    /// <summary>Which service translations go to. OpenRouter by default so existing setups keep working.</summary>
+    public LlmProvider Provider { get; set; } = LlmProvider.OpenRouter;
 
     /// <summary>OpenRouter model id for incoming JA→EN translation.</summary>
     public string Model { get; set; } = "google/gemini-3.8-flash";
@@ -62,14 +66,43 @@ public sealed class Configuration : IPluginConfiguration
     /// <summary>Model used for the outgoing EN→JA structured request, where quality matters more than latency.</summary>
     public string OutgoingModel { get; set; } = "google/gemini-3.8-flash";
 
+    /// <summary>Claude API model for incoming JA→EN batches (always sent with effort "low").</summary>
+    public string AnthropicModel { get; set; } = DefaultAnthropicModel;
+
+    /// <summary>Claude API model for the outgoing EN→JA structured request.</summary>
+    public string AnthropicOutgoingModel { get; set; } = DefaultAnthropicOutgoingModel;
+
+    /// <summary>Claude API <c>output_config.effort</c> for the outgoing request: "low", "medium" or "high".</summary>
+    public string AnthropicOutgoingEffort { get; set; } = Efforts.Medium;
+
+    /// <summary>
+    /// Send <c>fallbacks: "default"</c> to Sonnet 5.5 / Opus 5.5 so a safety-classifier refusal is retried server-side on
+    /// Anthropic's recommended model. Never sent for Haiku.
+    /// </summary>
+    public bool AnthropicRefusalFallback { get; set; } = true;
+
+    /// <summary>
+    /// How many recent lines of the same channel (or tell conversation) are sent as context with each request, 0–15.
+    /// </summary>
+    public int ContextLines { get; set; } = 6;
+
     /// <summary>Maximum concurrent in-flight translation requests.</summary>
     public int MaxConcurrency { get; set; } = 2;
 
     /// <summary>Per-request timeout. No fallback chain to other services on expiry.</summary>
     public int RequestTimeoutSeconds { get; set; } = 8;
 
-    /// <summary>Default politeness for outgoing translations; one of <see cref="Registers"/>.</summary>
-    public string DefaultRegister { get; set; } = Registers.Polite;
+    /// <summary>Default style of outgoing translations (the popup's style selector starts here).</summary>
+    public OutgoingStyle DefaultStyle { get; set; } = OutgoingStyle.Polite;
+
+    /// <summary>The player's own persona for <see cref="OutgoingStyle.Custom"/>, e.g. "speak like a cheerful Lalafell".</summary>
+    public string CustomStyleText { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Schema 1's politeness setting ("polite" or "casual"). Read only to migrate it to <see cref="DefaultStyle"/>;
+    /// never written back.
+    /// </summary>
+    public string? DefaultRegister { get; set; }
 
     /// <summary>
     /// The player's own glossary notes (Settings → Glossary), one per line, e.g. <c>ノ = o/ (raised hand)</c>. Appended
@@ -141,6 +174,8 @@ public sealed class Configuration : IPluginConfiguration
     /// <summary>Party Finder rows are hidden by the main window's channel filter (display only).</summary>
     public bool PartyFinderHidden { get; set; }
 
+    public const string DefaultAnthropicModel = "claude-haiku-5-5";
+    public const string DefaultAnthropicOutgoingModel = "claude-sonnet-5-5";
     public const string DefaultBypassPrefix = "\\";
     public const int MaxBypassPrefixLength = 3;
     public const int DefaultChatBarButtonOffsetX = 4;
@@ -150,6 +185,9 @@ public sealed class Configuration : IPluginConfiguration
 
     /// <summary>DPAPI-protected, base64 OpenRouter API key. Use <see cref="OpenRouterKey"/> instead.</summary>
     public string OpenRouterKeyProtected { get; set; } = string.Empty;
+
+    /// <summary>DPAPI-protected, base64 Claude API key. Use <see cref="AnthropicKey"/> instead.</summary>
+    public string AnthropicKeyProtected { get; set; } = string.Empty;
 
     /// <summary>DPAPI-protected, base64 secondary key (reserved for an optional classifier). Use <see cref="SecondaryKey"/>.</summary>
     public string SecondaryKeyProtected { get; set; } = string.Empty;
@@ -165,6 +203,25 @@ public sealed class Configuration : IPluginConfiguration
         get => ProtectedSecret.Unprotect(OpenRouterKeyProtected) ?? string.Empty;
         set => OpenRouterKeyProtected = ProtectOrEmpty(value);
     }
+
+    /// <summary>Plaintext Claude API key; same semantics as <see cref="OpenRouterKey"/>. Never serialized.</summary>
+    [JsonIgnore]
+    [System.Text.Json.Serialization.JsonIgnore]
+    public string AnthropicKey
+    {
+        get => ProtectedSecret.Unprotect(AnthropicKeyProtected) ?? string.Empty;
+        set => AnthropicKeyProtected = ProtectOrEmpty(value);
+    }
+
+    /// <summary>Model id used for incoming batches with the current <see cref="Provider"/>.</summary>
+    [JsonIgnore]
+    [System.Text.Json.Serialization.JsonIgnore]
+    public string ActiveIncomingModel => Provider == LlmProvider.Anthropic ? AnthropicModel : Model;
+
+    /// <summary>Whether the key of the current <see cref="Provider"/> is set.</summary>
+    [JsonIgnore]
+    [System.Text.Json.Serialization.JsonIgnore]
+    public bool HasActiveKey => (Provider == LlmProvider.Anthropic ? AnthropicKeyProtected : OpenRouterKeyProtected).Length > 0;
 
     /// <summary>Plaintext secondary key; same semantics as <see cref="OpenRouterKey"/>. Never serialized.</summary>
     [JsonIgnore]
@@ -211,17 +268,52 @@ public sealed class Configuration : IPluginConfiguration
     /// <summary>Upgrades an older saved schema in place. Call once after loading.</summary>
     public void Migrate()
     {
-        // No older schemas exist yet. Future: if (Version < 2) { ...; Version = 2; }
-        // Fields added later in schema 1 load as their defaults; only values a hand-edit could break are repaired.
+        if (Version < 2)
+        {
+            // Schema 1 → 2: the polite/casual register became a style.
+            DefaultStyle = string.Equals(DefaultRegister?.Trim(), "casual", StringComparison.OrdinalIgnoreCase)
+                ? OutgoingStyle.Casual
+                : OutgoingStyle.Polite;
+        }
+
+        DefaultRegister = null;
+
+        // Fields added later in a schema load as their defaults; only values a hand-edit could break are repaired.
         BypassPrefix = NormalizeBypassPrefix(BypassPrefix);
         UserGlossary ??= string.Empty;
+        CustomStyleText ??= string.Empty;
         if (!Enum.IsDefined(BypassModifier))
         {
             BypassModifier = BypassModifier.Ctrl;
         }
 
+        if (!Enum.IsDefined(Provider))
+        {
+            Provider = LlmProvider.OpenRouter;
+        }
+
+        DefaultStyle = Styles.Normalize(DefaultStyle);
+        if (string.IsNullOrWhiteSpace(AnthropicModel))
+        {
+            AnthropicModel = DefaultAnthropicModel;
+        }
+
+        if (string.IsNullOrWhiteSpace(AnthropicOutgoingModel))
+        {
+            AnthropicOutgoingModel = DefaultAnthropicOutgoingModel;
+        }
+
+        if (AnthropicOutgoingEffort is not (Efforts.Low or Efforts.Medium or Efforts.High))
+        {
+            AnthropicOutgoingEffort = Efforts.Medium;
+        }
+
+        ContextLines = Math.Clamp(ContextLines, 0, TranslationContext.MaxContextLines);
         Version = CurrentVersion;
     }
+
+    /// <summary>Newtonsoft: never write <see cref="DefaultRegister"/> back.</summary>
+    public bool ShouldSerializeDefaultRegister() => false;
 
     /// <summary>Persists this configuration via Dalamud.</summary>
     public void Save() => Services.PluginInterface.SavePluginConfig(this);

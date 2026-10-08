@@ -115,7 +115,7 @@ public class NumberedLineRouterTests
     }
 }
 
-public class OpenRouterTranslatorTests
+public class LlmTranslatorTests
 {
     private static Configuration Config() => new()
     {
@@ -137,8 +137,8 @@ public class OpenRouterTranslatorTests
     public void BuildsNumberedUserContent()
     {
         var lines = new[] { TestUtil.JaLine("よろしく"), TestUtil.JaLine("1ボス\n行きます") };
-        Assert.Equal("1: よろしく\n2: 1ボス 行きます", OpenRouterTranslator.BuildBatchUserContent(lines, Lang.En));
-        Assert.StartsWith("Target: Japanese\n1: ", OpenRouterTranslator.BuildBatchUserContent(lines, Lang.Ja));
+        Assert.Equal("1: よろしく\n2: 1ボス 行きます", LlmTranslator.BuildBatchUserContent(lines, Lang.En));
+        Assert.StartsWith("Target: Japanese\n1: ", LlmTranslator.BuildBatchUserContent(lines, Lang.Ja));
     }
 
     [Fact]
@@ -146,11 +146,11 @@ public class OpenRouterTranslatorTests
     {
         var handler = FakeHandler.Sse(Sse.Delta("1: Hi, let's"), Sse.Delta(" do this\n2: First time"), "data: [DONE]");
         using var client = TestUtil.Client(handler);
-        var translator = new OpenRouterTranslator(Config(), client, new TestLog());
+        var translator = new LlmTranslator(Config(), client, new TestLog());
         var lines = new[] { TestUtil.JaLine("よろしくお願いします"), TestUtil.JaLine("初見です") };
         var progress = new ListProgress();
 
-        await translator.TranslateBatchAsync(lines, Lang.En, progress, CancellationToken.None);
+        await translator.TranslateBatchAsync(lines, Lang.En, null, progress, CancellationToken.None);
 
         Assert.Equal("Hi, let's do this", progress.TextFor(lines[0].Id));
         Assert.Equal("First time", progress.TextFor(lines[1].Id));
@@ -165,12 +165,12 @@ public class OpenRouterTranslatorTests
     {
         var handler = FakeHandler.Sse(Sse.Delta("1: only one"), "data: [DONE]");
         using var client = TestUtil.Client(handler);
-        var translator = new OpenRouterTranslator(Config(), client, new TestLog());
+        var translator = new LlmTranslator(Config(), client, new TestLog());
         var lines = new[] { TestUtil.JaLine("一"), TestUtil.JaLine("二") };
         var progress = new ListProgress();
 
         var ex = await Assert.ThrowsAsync<IncompleteBatchException>(
-            () => translator.TranslateBatchAsync(lines, Lang.En, progress, CancellationToken.None));
+            () => translator.TranslateBatchAsync(lines, Lang.En, null, progress, CancellationToken.None));
 
         Assert.Equal([lines[1].Id], ex.MissingIds);
         Assert.Equal("only one", progress.TextFor(lines[0].Id));
@@ -180,12 +180,12 @@ public class OpenRouterTranslatorTests
     public async Task OutgoingSendsStrictSchemaAndParses()
     {
         const string answer = """
-            {"ja":"1ボスいきましょう","segments":[{"ja":"1ボス","reading":"いちぼす","en":"first boss"},{"ja":"いきましょう","reading":"いきましょう","en":"let's go"}],"back":"Let's go to the first boss.","register":"polite"}
+            {"ja":"1ボスいきましょう","segments":[{"ja":"1ボス","reading":"いちぼす","en":"first boss"},{"ja":"いきましょう","reading":"いきましょう","en":"let's go"}],"back":"Let's go to the first boss.","style":"polite"}
             """;
         var handler = new FakeHandler((_, _) => FakeHandler.Json(HttpStatusCode.OK, ChatCompletion(answer)));
         using var client = TestUtil.Client(handler);
-        var translator = new OpenRouterTranslator(Config(), client, new TestLog());
-        var draft = new OutgoingDraft { EnglishText = "let's pull the first boss", ChannelPrefix = "/p ", Register = Registers.Polite };
+        var translator = new LlmTranslator(Config(), client, new TestLog());
+        var draft = new OutgoingDraft { EnglishText = "let's pull the first boss", ChannelPrefix = "/p ", Style = OutgoingStyle.Polite };
 
         var result = await translator.TranslateOutgoingAsync(draft, CancellationToken.None);
 
@@ -203,8 +203,10 @@ public class OpenRouterTranslatorTests
         Assert.Equal("json_schema", format.GetProperty("type").GetString());
         Assert.True(format.GetProperty("json_schema").GetProperty("strict").GetBoolean());
         var props = format.GetProperty("json_schema").GetProperty("schema").GetProperty("properties");
-        Assert.Equal(["casual", "polite"], props.GetProperty("register").GetProperty("enum").EnumerateArray().Select(e => e.GetString()!).ToArray());
-        Assert.Contains("Register: polite\nText: let's pull the first boss", root.GetProperty("messages")[1].GetProperty("content").GetString());
+        Assert.Equal(["polite", "casual", "cool", "custom"], props.GetProperty("style").GetProperty("enum").EnumerateArray().Select(e => e.GetString()!).ToArray());
+        Assert.Equal(
+            "Style: polite — " + Prompts.PoliteStyle + "\nText: let's pull the first boss",
+            root.GetProperty("messages")[1].GetProperty("content").GetString());
         Assert.False(root.TryGetProperty("models", out _));
     }
 
@@ -217,17 +219,17 @@ public class OpenRouterTranslatorTests
         {
             calls++;
             var ja = calls == 1 ? tooLong : "短い";
-            return FakeHandler.Json(HttpStatusCode.OK, ChatCompletion($"{{\"ja\":\"{ja}\",\"segments\":[],\"back\":\"b\",\"register\":\"casual\"}}"));
+            return FakeHandler.Json(HttpStatusCode.OK, ChatCompletion($"{{\"ja\":\"{ja}\",\"segments\":[],\"back\":\"b\",\"style\":\"casual\"}}"));
         });
         using var client = TestUtil.Client(handler);
-        var translator = new OpenRouterTranslator(Config(), client, new TestLog());
+        var translator = new LlmTranslator(Config(), client, new TestLog());
 
         var result = await translator.TranslateOutgoingAsync(
-            new OutgoingDraft { EnglishText = "long text", ChannelPrefix = "/p ", Register = Registers.Casual }, CancellationToken.None);
+            new OutgoingDraft { EnglishText = "long text", ChannelPrefix = "/p ", Style = OutgoingStyle.Casual }, CancellationToken.None);
 
         Assert.Equal(2, calls);
         Assert.Equal("短い", result.JapaneseText);
-        Assert.Equal(Registers.Casual, result.Register);
+        Assert.Equal(OutgoingStyle.Casual, result.Style);
         Assert.Contains("shorter version", handler.Bodies[1]);
     }
 
@@ -236,9 +238,9 @@ public class OpenRouterTranslatorTests
     {
         var tooLong = new string('あ', 200);
         var handler = new FakeHandler((_, _) => FakeHandler.Json(
-            HttpStatusCode.OK, ChatCompletion($"{{\"ja\":\"{tooLong}\",\"segments\":[],\"back\":\"b\",\"register\":\"polite\"}}")));
+            HttpStatusCode.OK, ChatCompletion($"{{\"ja\":\"{tooLong}\",\"segments\":[],\"back\":\"b\",\"style\":\"polite\"}}")));
         using var client = TestUtil.Client(handler);
-        var translator = new OpenRouterTranslator(Config(), client, new TestLog());
+        var translator = new LlmTranslator(Config(), client, new TestLog());
 
         var result = await translator.TranslateOutgoingAsync(new OutgoingDraft { EnglishText = "x" }, CancellationToken.None);
 
@@ -247,17 +249,23 @@ public class OpenRouterTranslatorTests
     }
 
     [Fact]
-    public void ParseOutgoingToleratesFenceAndBadRegister()
+    public void ParseOutgoingToleratesFenceProseAndBadStyle()
     {
-        var (ja, segments, back, register) = OpenRouterTranslator.ParseOutgoing(
-            "```json\n{\"ja\":\"おつ\",\"segments\":[{\"ja\":\"おつ\",\"reading\":\"おつ\",\"en\":\"gg\"}],\"back\":\"gg\",\"register\":\"formal\"}\n```",
-            Registers.Casual);
+        var (ja, segments, back, style) = LlmTranslator.ParseOutgoing(
+            "```json\n{\"ja\":\"おつ\",\"segments\":[{\"ja\":\"おつ\",\"reading\":\"おつ\",\"en\":\"gg\"}],\"back\":\"gg\",\"style\":\"formal\"}\n```",
+            OutgoingStyle.Casual);
         Assert.Equal("おつ", ja);
         Assert.Single(segments);
         Assert.Equal("gg", back);
-        Assert.Equal(Registers.Casual, register);
-        Assert.Throws<OpenRouterException>(() => OpenRouterTranslator.ParseOutgoing("not json", Registers.Polite));
-        Assert.Throws<OpenRouterException>(() => OpenRouterTranslator.ParseOutgoing("{\"ja\":\"\"}", Registers.Polite));
+        Assert.Equal(OutgoingStyle.Casual, style);
+        Assert.Throws<LlmException>(() => LlmTranslator.ParseOutgoing("not json", OutgoingStyle.Polite));
+        Assert.Throws<LlmException>(() => LlmTranslator.ParseOutgoing("{\"ja\":\"\"}", OutgoingStyle.Polite));
+
+        var (proseJa, _, _, proseStyle) = LlmTranslator.ParseOutgoing(
+            "Here is the JSON:\n{\"ja\":\"行こうか。\",\"segments\":[],\"back\":\"Shall we go.\",\"style\":\"cool\"}\nDone.",
+            OutgoingStyle.Polite);
+        Assert.Equal("行こうか。", proseJa);
+        Assert.Equal(OutgoingStyle.Cool, proseStyle);
     }
 
     private static string ChatCompletion(string content) =>

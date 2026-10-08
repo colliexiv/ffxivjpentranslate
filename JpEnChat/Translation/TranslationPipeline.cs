@@ -46,6 +46,7 @@ public sealed class TranslationPipeline : ITranslationCorrections, IDisposable
     private readonly ITranslator translator;
     private readonly Action<Action> runOnFrameworkThread;
     private readonly ILog log;
+    private readonly Func<ChatLine, TranslationContext?>? contextProvider;
 
     private readonly object gate = new();
     private readonly Dictionary<string, SenderBatch> pending = new(StringComparer.Ordinal);
@@ -62,7 +63,8 @@ public sealed class TranslationPipeline : ITranslationCorrections, IDisposable
         ITranslationCache cache,
         ITranslator translator,
         Action<Action> runOnFrameworkThread,
-        ILog log)
+        ILog log,
+        Func<ChatLine, TranslationContext?>? contextProvider = null)
     {
         ArgumentNullException.ThrowIfNull(config);
         ArgumentNullException.ThrowIfNull(detector);
@@ -76,6 +78,7 @@ public sealed class TranslationPipeline : ITranslationCorrections, IDisposable
         this.translator = translator;
         this.runOnFrameworkThread = runOnFrameworkThread;
         this.log = log;
+        this.contextProvider = contextProvider;
 
         var max = Math.Clamp(config.MaxConcurrency, 1, 16);
         concurrency = new SemaphoreSlim(max, max);
@@ -115,7 +118,15 @@ public sealed class TranslationPipeline : ITranslationCorrections, IDisposable
 
         var debounceMs = Math.Clamp(config.DebounceMs, 0, 10_000);
         var key = line.SenderName + "@" + line.SenderWorld;
-        List<ChatLine>? sendNow = null;
+        SenderBatch? sendNow = null;
+        bool isNew;
+        lock (gate)
+        {
+            isNew = !pending.ContainsKey(key);
+        }
+
+        // Context is captured for the batch's first line only, on this (framework) thread, before taking the lock again.
+        var context = isNew ? BuildContext(line) : null;
         lock (gate)
         {
             if (disposed)
@@ -125,7 +136,7 @@ public sealed class TranslationPipeline : ITranslationCorrections, IDisposable
 
             if (!pending.TryGetValue(key, out var batch))
             {
-                batch = new SenderBatch(key);
+                batch = new SenderBatch(key) { Context = context ?? BuildContext(line) };
                 batch.Timer = new Timer(OnDebounceElapsed, batch, Timeout.Infinite, Timeout.Infinite);
                 pending[key] = batch;
             }
@@ -133,7 +144,8 @@ public sealed class TranslationPipeline : ITranslationCorrections, IDisposable
             batch.Lines.Add(line);
             if (batch.Lines.Count >= MaxBatchLines)
             {
-                sendNow = TakeLocked(batch);
+                TakeLocked(batch);
+                sendNow = batch;
             }
             else
             {
@@ -145,7 +157,7 @@ public sealed class TranslationPipeline : ITranslationCorrections, IDisposable
 
         if (sendNow is not null)
         {
-            StartJob(sendNow);
+            StartJob(sendNow.Lines, sendNow.Context);
         }
     }
 
@@ -159,7 +171,7 @@ public sealed class TranslationPipeline : ITranslationCorrections, IDisposable
         ArgumentNullException.ThrowIfNull(line);
         if (Admit(line))
         {
-            StartJob([line]);
+            StartJob([line], BuildContext(line));
         }
     }
 
@@ -175,7 +187,7 @@ public sealed class TranslationPipeline : ITranslationCorrections, IDisposable
         line.Translation = string.Empty;
         line.Error = null;
         line.Status = TranslationStatus.Pending;
-        StartJob([line]);
+        StartJob([line], BuildContext(line));
     }
 
     /// <summary>
@@ -270,7 +282,10 @@ public sealed class TranslationPipeline : ITranslationCorrections, IDisposable
     {
         MissingApiKeyException => "no API key",
         IncompleteBatchException => "no output",
-        OpenRouterException { StatusCode: { } status } => status switch
+        LlmRefusalException => "refused",
+        AnthropicException { StatusCode: 400, ApiMessage: { Length: > 0 } message } => "400: " + Shorten(message),
+        AnthropicException { StatusCode: 401 } => "bad key",
+        LlmException { StatusCode: { } status } => status switch
         {
             400 => "400 bad request",
             401 => "401 bad key",
@@ -282,15 +297,18 @@ public sealed class TranslationPipeline : ITranslationCorrections, IDisposable
             429 => "429 rate limited",
             502 => "502 provider error",
             503 => "503 no provider",
+            529 => "529 overloaded",
             >= 500 => $"{status} server error",
             _ => $"{status} error",
         },
-        OpenRouterException => "provider error",
+        LlmException => "provider error",
         TimeoutException => "timeout",
         HttpRequestException => "network error",
         OperationCanceledException => "cancelled",
         _ => "error",
     };
+
+    private static string Shorten(string s) => s.Length <= 80 ? s : s[..79] + "…";
 
     public void Dispose()
     {
@@ -382,7 +400,7 @@ public sealed class TranslationPipeline : ITranslationCorrections, IDisposable
             lines = TakeLocked(batch);
         }
 
-        StartJob(lines);
+        StartJob(lines, batch.Context);
     }
 
     /// <summary>Removes the batch and returns its lines. Caller holds <see cref="gate"/>.</summary>
@@ -394,13 +412,32 @@ public sealed class TranslationPipeline : ITranslationCorrections, IDisposable
         return batch.Lines;
     }
 
-    private void StartJob(List<ChatLine> lines)
+    private void StartJob(List<ChatLine> lines, TranslationContext? context)
     {
         Interlocked.Increment(ref activeJobs);
-        _ = Task.Run(() => RunJobAsync(lines));
+        _ = Task.Run(() => RunJobAsync(lines, context));
     }
 
-    private async Task RunJobAsync(List<ChatLine> lines)
+    /// <summary>Context for a batch starting with <paramref name="first"/>; null without a provider or on failure. Framework thread.</summary>
+    private TranslationContext? BuildContext(ChatLine first)
+    {
+        if (contextProvider is null)
+        {
+            return null;
+        }
+
+        try
+        {
+            return contextProvider(first);
+        }
+        catch (Exception ex)
+        {
+            log.Debug($"Building the translation context failed: {ex.GetType().Name}: {ex.Message}");
+            return null;
+        }
+    }
+
+    private async Task RunJobAsync(List<ChatLine> lines, TranslationContext? context)
     {
         try
         {
@@ -439,7 +476,7 @@ public sealed class TranslationPipeline : ITranslationCorrections, IDisposable
             IReadOnlyCollection<long> missing = [];
             try
             {
-                await translator.TranslateBatchAsync(lines, Lang.En, progress, shutdown).ConfigureAwait(false);
+                await translator.TranslateBatchAsync(lines, Lang.En, context, progress, shutdown).ConfigureAwait(false);
             }
             catch (IncompleteBatchException ex)
             {
@@ -449,7 +486,7 @@ public sealed class TranslationPipeline : ITranslationCorrections, IDisposable
             var ttft = Interlocked.Read(ref firstDeltaTicks);
             log.Information(
                 $"Translated {lines.Count} line(s) in {sw.ElapsedMilliseconds} ms " +
-                $"(first token {(ttft == 0 ? "n/a" : $"{ttft * 1000 / Stopwatch.Frequency} ms")}, model {config.Model}" +
+                $"(first token {(ttft == 0 ? "n/a" : $"{ttft * 1000 / Stopwatch.Frequency} ms")}, model {config.ActiveIncomingModel}" +
                 $"{(missing.Count > 0 ? $", {missing.Count} missing" : string.Empty)}).");
             CompleteLines(lines, missing);
         }
@@ -561,6 +598,9 @@ public sealed class TranslationPipeline : ITranslationCorrections, IDisposable
         public Timer? Timer { get; set; }
 
         public bool Taken { get; set; }
+
+        /// <summary>Context captured when the first line arrived.</summary>
+        public TranslationContext? Context { get; init; }
     }
 
     /// <summary>Synchronous <see cref="IProgress{T}"/>: unlike <see cref="Progress{T}"/> it never reorders reports.</summary>

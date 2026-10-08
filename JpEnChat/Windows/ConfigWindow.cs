@@ -16,7 +16,7 @@ using JpEnChat.Ui;
 namespace JpEnChat.Windows;
 
 /// <summary>
-/// Settings window: General, Translation, Vanilla chat, Channels, Translations, Glossary and Keys tabs (PLAN §5, §9, §11).
+/// Settings window: General, Translation, Vanilla chat, Channels, Translations, Glossary and Keys tabs (PLAN §5, §9, §11, §12).
 /// </summary>
 /// <remarks>
 /// Toggles and combos save immediately. Sliders apply live (so the font size previews while dragging) and save when
@@ -31,18 +31,41 @@ public sealed class ConfigWindow : Window, IDisposable
     private const int KeyMaxBytes = 256;
     private const int ModelMaxBytes = 128;
 
-    private static readonly string[] PresetModels =
+    private const int CustomStyleMaxBytes = LlmTranslator.MaxCustomStyleChars * 3;
+
+    // Claude list prices per million tokens (input/output), shown next to the presets.
+    private const string HaikuPrice = "$0.10/$0.50 per MTok";
+    private const string SonnetPrice = "$2/$10 per MTok";
+    private const string OpusPrice = "$4/$20 per MTok";
+
+    private static readonly ModelPreset[] OpenRouterPresets =
     [
-        "google/gemini-3.8-flash",
-        "google/gemini-3.5-flash-lite",
-        "google/gemini-2.5-flash-lite",
-        "openai/gpt-4.1-mini",
-        "anthropic/claude-haiku-4.5",
+        new("google/gemini-3.8-flash"),
+        new("google/gemini-3.5-flash-lite"),
+        new("google/gemini-2.5-flash-lite"),
+        new("openai/gpt-4.1-mini"),
+        new("anthropic/claude-haiku-4.5", "$1/$5 per MTok"),
+        new("anthropic/claude-haiku-5.5", HaikuPrice),
+        new("anthropic/claude-sonnet-5.5", SonnetPrice),
+        new("anthropic/claude-opus-5.5", OpusPrice),
     ];
+
+    private static readonly ModelPreset[] AnthropicPresets =
+    [
+        new("claude-haiku-5-5", HaikuPrice),
+        new("claude-sonnet-5-5", SonnetPrice),
+        new("claude-opus-5-5", OpusPrice),
+    ];
+
+    private static readonly LlmProvider[] ProviderValues = [LlmProvider.OpenRouter, LlmProvider.Anthropic];
+    private static readonly string[] ProviderLabels = ["OpenRouter", "Anthropic (Claude API)"];
 
     // Values stored in Configuration.ReasoningEffort; "" means omit the reasoning object.
     private static readonly string[] EffortValues = ["low", "medium", "high", ""];
     private static readonly string[] EffortLabels = ["low", "medium", "high", "none (omit)"];
+
+    // Values of Configuration.AnthropicOutgoingEffort.
+    private static readonly string[] ClaudeEffortValues = [Efforts.Low, Efforts.Medium, Efforts.High];
 
     private readonly Configuration configuration;
     private readonly Func<bool> chatHookInstalled;
@@ -55,6 +78,9 @@ public sealed class ConfigWindow : Window, IDisposable
 
     private string modelBuffer = string.Empty;
     private string outgoingModelBuffer = string.Empty;
+    private string anthropicModelBuffer = string.Empty;
+    private string anthropicOutgoingModelBuffer = string.Empty;
+    private string customStyleBuffer = string.Empty;
     private string fallbackBuffer = string.Empty;
     private int maxLogLinesBuffer;
     private int maxCacheEntriesBuffer;
@@ -65,6 +91,7 @@ public sealed class ConfigWindow : Window, IDisposable
 
     // Plaintext lives only while the window is open; decrypted on open, wiped on close.
     private readonly KeyEditor primaryKey;
+    private readonly KeyEditor anthropicKey;
     private readonly KeyEditor secondaryKey;
 
     /// <param name="configuration">Settings to edit; saved via <see cref="Configuration.Save"/>.</param>
@@ -86,6 +113,13 @@ public sealed class ConfigWindow : Window, IDisposable
             v => configuration.OpenRouterKey = v,
             () => configuration.OpenRouterKeyProtected.Length > 0,
             Commit);
+        anthropicKey = new KeyEditor(
+            "Anthropic API key",
+            "##anthropicKey",
+            () => configuration.AnthropicKey,
+            v => configuration.AnthropicKey = v,
+            () => configuration.AnthropicKeyProtected.Length > 0,
+            Commit);
         secondaryKey = new KeyEditor(
             "Secondary key (reserved for an optional classifier; unused for now)",
             "##secondaryKey",
@@ -104,6 +138,7 @@ public sealed class ConfigWindow : Window, IDisposable
     public void Dispose()
     {
         primaryKey.Wipe();
+        anthropicKey.Wipe();
         secondaryKey.Wipe();
         font.Dispose();
     }
@@ -112,6 +147,9 @@ public sealed class ConfigWindow : Window, IDisposable
     {
         modelBuffer = configuration.Model;
         outgoingModelBuffer = configuration.OutgoingModel;
+        anthropicModelBuffer = configuration.AnthropicModel;
+        anthropicOutgoingModelBuffer = configuration.AnthropicOutgoingModel;
+        customStyleBuffer = configuration.CustomStyleText;
         fallbackBuffer = string.Join('\n', configuration.FallbackModels);
         maxLogLinesBuffer = configuration.MaxLogLines;
         maxCacheEntriesBuffer = configuration.MaxCacheEntries;
@@ -124,12 +162,14 @@ public sealed class ConfigWindow : Window, IDisposable
         glossaryInfo = DescribeGlossary(glossaryBuffer);
         translationsTab.Reset();
         primaryKey.Load();
+        anthropicKey.Load();
         secondaryKey.Load();
     }
 
     public override void OnClose()
     {
         primaryKey.Wipe();
+        anthropicKey.Wipe();
         secondaryKey.Wipe();
         translationsTab.Reset();
     }
@@ -214,21 +254,46 @@ public sealed class ConfigWindow : Window, IDisposable
         ImGuiComponents.HelpMarker(
             "How long to wait for more lines from the same sender before translating, so macro bursts go in one request.");
 
-        ImGui.AlignTextToFramePadding();
-        ImGui.TextUnformatted("Default register:");
-        ImGui.SameLine();
-        if (ImGui.RadioButton("polite", configuration.DefaultRegister == Registers.Polite))
+        ImGui.Separator();
+        ImGui.TextUnformatted("Outgoing style (Japanese you send)");
+        for (var i = 0; i < Styles.All.Length; i++)
         {
-            configuration.DefaultRegister = Registers.Polite;
+            var style = Styles.All[i];
+            if (i > 0)
+            {
+                ImGui.SameLine();
+            }
+
+            if (ImGui.RadioButton(Styles.Label(style), configuration.DefaultStyle == style))
+            {
+                configuration.DefaultStyle = style;
+                Commit();
+            }
+        }
+
+        ImGuiComponents.HelpMarker(
+            "The style the translate popup starts in; you can switch per message there.\n"
+            + "Polite: friendly です/ます (strangers, Party Finder).\n"
+            + "Casual: タメ口 among friends.\n"
+            + "Cool: calm, composed and concise; polite-leaning but not stiff, short sentences (\"let's go\" → 行こうか。).\n"
+            + "Custom: your own persona text below.");
+
+        ImGui.TextUnformatted("Custom persona");
+        ImGui.InputTextMultiline(
+            "##customStyle",
+            ref customStyleBuffer,
+            CustomStyleMaxBytes,
+            new Vector2(-1f, ImGui.GetTextLineHeightWithSpacing() * 3f));
+        if (ImGui.IsItemDeactivatedAfterEdit())
+        {
+            configuration.CustomStyleText = customStyleBuffer.Trim();
+            customStyleBuffer = configuration.CustomStyleText;
             Commit();
         }
 
-        ImGui.SameLine();
-        if (ImGui.RadioButton("casual", configuration.DefaultRegister == Registers.Casual))
-        {
-            configuration.DefaultRegister = Registers.Casual;
-            Commit();
-        }
+        ImGui.TextDisabled(customStyleBuffer.Trim().Length == 0
+            ? "e.g. \"speak like a cheerful Lalafell\". Empty: Custom falls back to Polite."
+            : $"{LlmTranslator.CleanCustomStyle(customStyleBuffer).Length}/{LlmTranslator.MaxCustomStyleChars} characters sent. Saved when the box loses focus.");
 
         ImGui.Separator();
         ImGui.TextUnformatted("Party Finder");
@@ -258,7 +323,74 @@ public sealed class ConfigWindow : Window, IDisposable
 
     private void DrawTranslation()
     {
-        DrawModelField("Model (incoming JA→EN)", "##model", ref modelBuffer, v => configuration.Model = v);
+        var providerIndex = Math.Max(Array.IndexOf(ProviderValues, configuration.Provider), 0);
+        using (var combo = ImRaii.Combo("Provider", ProviderLabels[providerIndex]))
+        {
+            if (combo.Success)
+            {
+                for (var i = 0; i < ProviderValues.Length; i++)
+                {
+                    if (ImGui.Selectable(ProviderLabels[i], i == providerIndex))
+                    {
+                        configuration.Provider = ProviderValues[i];
+                        Commit();
+                    }
+                }
+            }
+        }
+
+        ImGuiComponents.HelpMarker(
+            "OpenRouter: many models behind one key, billed by OpenRouter.\n"
+            + "Anthropic: Claude models on the Claude API directly. Max/Team monthly API credits apply only here. "
+            + "Set the matching key on the Keys tab. Applies to the next request.");
+
+        if (!configuration.HasActiveKey)
+        {
+            ImGui.TextColored(ImGuiColors.DalamudYellow, "No key for this provider yet: see the Keys tab.");
+        }
+
+        ImGui.Separator();
+        if (configuration.Provider == LlmProvider.Anthropic)
+        {
+            DrawAnthropicModels();
+        }
+        else
+        {
+            DrawOpenRouterModels();
+        }
+
+        ImGui.Separator();
+        var contextLines = configuration.ContextLines;
+        if (ImGui.SliderInt("Context lines", ref contextLines, 0, TranslationContext.MaxContextLines))
+        {
+            configuration.ContextLines = contextLines;
+        }
+
+        CommitIfReleased();
+        ImGuiComponents.HelpMarker(
+            "Each request also sends your zone, duty, job and channel, plus this many recent lines of the same channel "
+            + "(or tell conversation) with their translations, so the model can resolve references. 0 sends no recent lines.");
+
+        var concurrency = configuration.MaxConcurrency;
+        if (ImGui.SliderInt("Max concurrent requests", ref concurrency, 1, 4))
+        {
+            configuration.MaxConcurrency = concurrency;
+        }
+
+        CommitIfReleased();
+
+        var timeout = configuration.RequestTimeoutSeconds;
+        if (ImGui.SliderInt("Request timeout", ref timeout, 3, 30, "%d s"))
+        {
+            configuration.RequestTimeoutSeconds = timeout;
+        }
+
+        CommitIfReleased();
+    }
+
+    private void DrawOpenRouterModels()
+    {
+        DrawModelField("Model (incoming JA→EN)", "##model", ref modelBuffer, OpenRouterPresets, v => configuration.Model = v);
 
         ImGui.TextUnformatted("Fallback models (one per line)");
         ImGui.InputTextMultiline(
@@ -298,28 +430,55 @@ public sealed class ConfigWindow : Window, IDisposable
 
         ImGui.Separator();
         DrawModelField(
-            "Outgoing model (EN→JA)", "##outgoingModel", ref outgoingModelBuffer, v => configuration.OutgoingModel = v);
+            "Outgoing model (EN→JA)", "##outgoingModel", ref outgoingModelBuffer, OpenRouterPresets, v => configuration.OutgoingModel = v);
+    }
+
+    private void DrawAnthropicModels()
+    {
+        DrawModelField(
+            "Model (incoming JA→EN)", "##anthropicModel", ref anthropicModelBuffer, AnthropicPresets, v => configuration.AnthropicModel = v);
+        ImGui.TextDisabled("Incoming batches always use effort \"low\" for speed.");
 
         ImGui.Separator();
-        var concurrency = configuration.MaxConcurrency;
-        if (ImGui.SliderInt("Max concurrent requests", ref concurrency, 1, 4))
+        DrawModelField(
+            "Outgoing model (EN→JA)",
+            "##anthropicOutgoingModel",
+            ref anthropicOutgoingModelBuffer,
+            AnthropicPresets,
+            v => configuration.AnthropicOutgoingModel = v);
+
+        var effortIndex = Math.Max(Array.IndexOf(ClaudeEffortValues, configuration.AnthropicOutgoingEffort), 0);
+        using (var combo = ImRaii.Combo("Outgoing effort", ClaudeEffortValues[effortIndex]))
         {
-            configuration.MaxConcurrency = concurrency;
+            if (combo.Success)
+            {
+                for (var i = 0; i < ClaudeEffortValues.Length; i++)
+                {
+                    if (ImGui.Selectable(ClaudeEffortValues[i], i == effortIndex))
+                    {
+                        configuration.AnthropicOutgoingEffort = ClaudeEffortValues[i];
+                        Commit();
+                    }
+                }
+            }
         }
 
-        CommitIfReleased();
+        ImGuiComponents.HelpMarker("How much the model thinks before writing your Japanese. Higher is slower and costs more output tokens.");
 
-        var timeout = configuration.RequestTimeoutSeconds;
-        if (ImGui.SliderInt("Request timeout", ref timeout, 3, 30, "%d s"))
+        var fallback = configuration.AnthropicRefusalFallback;
+        if (ImGui.Checkbox("Retry refusals on Anthropic's fallback model (Sonnet/Opus 5.5)", ref fallback))
         {
-            configuration.RequestTimeoutSeconds = timeout;
+            configuration.AnthropicRefusalFallback = fallback;
+            Commit();
         }
 
-        CommitIfReleased();
+        ImGuiComponents.HelpMarker(
+            "Sends fallbacks: \"default\" so a request a safety classifier declines is re-run server-side on the model Anthropic "
+            + "recommends. Never used with Haiku.");
     }
 
     /// <summary>Model id text box with a preset combo next to it. The text applies on focus loss.</summary>
-    private void DrawModelField(string label, string id, ref string buffer, Action<string> apply)
+    private void DrawModelField(string label, string id, ref string buffer, ModelPreset[] presets, Action<string> apply)
     {
         ImGui.TextUnformatted(label);
         var comboWidth = ImGui.GetFontSize() * 7f;
@@ -330,11 +489,17 @@ public sealed class ConfigWindow : Window, IDisposable
             buffer = buffer.Trim();
             if (buffer.Length == 0)
             {
-                buffer = PresetModels[0];
+                buffer = presets[0].Id;
             }
 
             apply(buffer);
             Commit();
+        }
+
+        var current = buffer;
+        if (ImGui.IsItemHovered() && Array.Find(presets, p => string.Equals(p.Id, current, StringComparison.Ordinal)) is { Price: { } price })
+        {
+            ImGui.SetTooltip(price);
         }
 
         ImGui.SameLine();
@@ -345,12 +510,12 @@ public sealed class ConfigWindow : Window, IDisposable
             return;
         }
 
-        foreach (var preset in PresetModels)
+        foreach (var preset in presets)
         {
-            if (ImGui.Selectable(preset, string.Equals(preset, buffer, StringComparison.Ordinal)))
+            if (ImGui.Selectable(preset.Label, string.Equals(preset.Id, buffer, StringComparison.Ordinal)))
             {
-                buffer = preset;
-                apply(preset);
+                buffer = preset.Id;
+                apply(preset.Id);
                 Commit();
             }
         }
@@ -609,6 +774,16 @@ public sealed class ConfigWindow : Window, IDisposable
     {
         primaryKey.Draw();
         ImGui.Separator();
+        anthropicKey.Draw();
+        ImGui.TextDisabled("Max/Team monthly API credits apply only to this provider.");
+        using (ImRaii.PushColor(ImGuiCol.Text, ImGui.GetColorU32(ImGuiCol.TextDisabled)))
+        {
+            ImGui.TextWrapped(
+                "Get a key at console.anthropic.com → API keys. To spend your plan's monthly API credits, link the Console "
+                + "organization to your plan in claude.ai → Settings → Billing. Then choose Provider: Anthropic on the Translation tab.");
+        }
+
+        ImGui.Separator();
         secondaryKey.Draw();
         ImGui.Spacing();
         ImGui.TextDisabled("Keys are encrypted with Windows DPAPI for this Windows user and never logged.");
@@ -676,5 +851,11 @@ public sealed class ConfigWindow : Window, IDisposable
                 ImGui.TextDisabled(status);
             }
         }
+    }
+
+    /// <summary>A model id offered in a preset combo, with an optional price hint.</summary>
+    private sealed record ModelPreset(string Id, string? Price = null)
+    {
+        public string Label => Price is null ? Id : $"{Id}  ({Price})";
     }
 }

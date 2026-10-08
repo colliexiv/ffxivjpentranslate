@@ -70,9 +70,9 @@ public class GlossaryPromptTests
         var config = new Configuration { UserGlossary = "ノ = o/ (raised hand)" };
         var handler = FakeHandler.Sse(Sse.Delta("1: o/"), "data: [DONE]");
         using var client = TestUtil.Client(handler);
-        var translator = new OpenRouterTranslator(config, client, new TestLog());
+        var translator = new LlmTranslator(config, client, new TestLog());
 
-        await translator.TranslateBatchAsync([TestUtil.JaLine("ノ")], Lang.En, new ListProgress(), CancellationToken.None);
+        await translator.TranslateBatchAsync([TestUtil.JaLine("ノ")], Lang.En, null, new ListProgress(), CancellationToken.None);
 
         using (var doc = JsonDocument.Parse(handler.Bodies.Single()))
         {
@@ -81,13 +81,13 @@ public class GlossaryPromptTests
             Assert.EndsWith("follow these exactly):\nノ = o/ (raised hand)", system, System.StringComparison.Ordinal);
         }
 
-        const string answer = "{\"ja\":\"ノ\",\"segments\":[],\"back\":\"o/\",\"register\":\"casual\"}";
+        const string answer = "{\"ja\":\"ノ\",\"segments\":[],\"back\":\"o/\",\"style\":\"casual\"}";
         var outHandler = new FakeHandler((_, _) => FakeHandler.Json(
             HttpStatusCode.OK,
             JsonSerializer.Serialize(new { choices = new[] { new { message = new { role = "assistant", content = answer } } } })));
         using var outClient = TestUtil.Client(outHandler);
-        var outTranslator = new OpenRouterTranslator(config, outClient, new TestLog());
-        await outTranslator.TranslateOutgoingAsync(new OutgoingDraft { EnglishText = "o/", Register = Registers.Casual }, CancellationToken.None);
+        var outTranslator = new LlmTranslator(config, outClient, new TestLog());
+        await outTranslator.TranslateOutgoingAsync(new OutgoingDraft { EnglishText = "o/", Style = OutgoingStyle.Casual }, CancellationToken.None);
 
         using var outDoc = JsonDocument.Parse(outHandler.Bodies.Single());
         Assert.Equal(

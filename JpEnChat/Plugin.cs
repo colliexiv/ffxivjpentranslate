@@ -26,6 +26,8 @@ public sealed class Plugin : IDalamudPlugin
     private readonly ConfigWindow configWindow;
     private readonly LruTranslationCache cache;
     private readonly OpenRouterClient client;
+    private readonly AnthropicClient anthropicClient;
+    private readonly GameContextProvider gameContext = new();
     private readonly TranslationPipeline pipeline;
     private readonly ChatSendHook chatSendHook;
     private readonly QuickTranslatePopup quickPopup;
@@ -63,16 +65,27 @@ public sealed class Plugin : IDalamudPlugin
             cache.Save();
         }
 
+        // Providers (PLAN §12): both clients live for the whole session; BackendSwitch picks one per request, so changing
+        // the provider in the settings applies to the next request.
         client = new OpenRouterClient(() => Configuration.OpenRouterKey, () => Configuration.RequestTimeoutSeconds, log);
-        var translator = new OpenRouterTranslator(Configuration, client, log);
+        anthropicClient = new AnthropicClient(
+            () => Configuration.AnthropicKey,
+            () => Configuration.RequestTimeoutSeconds,
+            () => Configuration.AnthropicRefusalFallback,
+            log);
+        var backend = new BackendSwitch(() => Configuration.Provider, client, anthropicClient);
+        var translator = new LlmTranslator(Configuration, backend, log);
         var detector = new ScriptLanguageDetector();
+        var contextBuilder = new TranslationContextBuilder(
+            ChatLog, () => Configuration.ContextLines, gameContext.Current, ChatChannels.DisplayName);
         pipeline = new TranslationPipeline(
             Configuration,
             detector,
             cache,
             translator,
             action => Services.Framework.RunOnFrameworkThread(action),
-            log);
+            log,
+            contextBuilder.ForIncoming);
 
         // Game I/O (PLAN §3.1, §4.1 step 4). Every plugin send goes through the hook's bypass (PLAN §9).
         var chatSender = new GameChatSender(log);
@@ -80,18 +93,11 @@ public sealed class Plugin : IDalamudPlugin
 
         var outgoingTranslator = new PipelineOutgoingTranslator(pipeline);
         configWindow = new ConfigWindow(Configuration, cache, pipeline.RequestCacheSave, () => chatSendHook.IsInstalled);
-        mainWindow = new MainWindow(
-            Configuration,
-            ChatLog,
-            outgoingTranslator,
-            SendChat,
-            pipeline,
-            CurrentWorldName,
-            LocalPlayerName,
-            OpenConfig);
+        mainWindow = new MainWindow(Configuration, ChatLog, pipeline, CurrentWorldName, OpenConfig);
 
         // Vanilla chat integration (PLAN §9): popup for lines typed into the game's chat box, and the chat-bar button.
-        quickPopup = new QuickTranslatePopup(Configuration, ChatLog, outgoingTranslator, SendChat, LocalPlayerName);
+        quickPopup = new QuickTranslatePopup(
+            Configuration, ChatLog, outgoingTranslator, SendChat, LocalPlayerName, contextBuilder.ForOutgoing);
         chatBarButton = new ChatBarButton(Configuration, ToggleMainUi);
 
         // Party Finder (PLAN §10): popup next to a listing's detail window.
@@ -143,6 +149,7 @@ public sealed class Plugin : IDalamudPlugin
 
         pipeline.Dispose();
         client.Dispose();
+        anthropicClient.Dispose();
     }
 
     private void OnCommand(string command, string args)
@@ -215,7 +222,7 @@ public sealed class Plugin : IDalamudPlugin
     /// <summary>
     /// Sends one confirmed chat command on the framework thread, bypassing the chat-box hook so the plugin's own line is
     /// never intercepted. Registers it with ingest first so the game's echo of a tell is not logged twice (the
-    /// composer and the popup add the sent row themselves).
+    /// popup adds the sent row itself).
     /// </summary>
     private Task SendChat(string command) =>
         Services.Framework.RunOnFrameworkThread(() =>

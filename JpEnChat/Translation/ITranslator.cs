@@ -7,7 +7,7 @@ using JpEnChat.Models;
 namespace JpEnChat.Translation;
 
 /// <summary>
-/// LLM-backed translator (Phase 2A: OpenRouter streaming chat completions, PLAN §3.3).
+/// LLM-backed translator (PLAN §3.3, §12): OpenRouter or the Claude API, chosen in the settings.
 /// </summary>
 /// <remarks>
 /// Implementations run on thread-pool threads and must not touch <see cref="ChatLine"/> state or any
@@ -22,18 +22,20 @@ public interface ITranslator
     /// </summary>
     /// <param name="lines">Lines to translate, in display order. Their translations map back by <see cref="ChatLine.Id"/>.</param>
     /// <param name="target">Target language (<see cref="Lang.En"/> for incoming JA).</param>
+    /// <param name="context">Game context and recent lines, captured when the batch was queued; null when unavailable.</param>
     /// <param name="progress">Receives text deltas per line as they stream. Invoked on a background thread.</param>
     /// <param name="ct">Cancelled on plugin unload or when the job is superseded.</param>
     /// <returns>Completes when the stream ends. Faults (HTTP 4xx/5xx, timeout, parse) propagate as exceptions.</returns>
     Task TranslateBatchAsync(
         IReadOnlyList<ChatLine> lines,
         Lang target,
+        TranslationContext? context,
         IProgress<(long LineId, string Delta)> progress,
         CancellationToken ct);
 
     /// <summary>
-    /// EN→JA with structured output (ja, segments, back-translation, register; PLAN §4.1).
-    /// Uses <see cref="OutgoingDraft.EnglishText"/> and <see cref="OutgoingDraft.Register"/> as input.
+    /// EN→JA with structured output (ja, segments, back-translation, style; PLAN §4.1, §12).
+    /// Uses <see cref="OutgoingDraft.EnglishText"/>, <see cref="OutgoingDraft.Style"/> and <see cref="OutgoingDraft.Context"/> as input.
     /// </summary>
     /// <returns>A copy of <paramref name="draft"/> with the Japanese fields filled.</returns>
     Task<OutgoingDraft> TranslateOutgoingAsync(OutgoingDraft draft, CancellationToken ct);

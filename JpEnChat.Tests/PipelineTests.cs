@@ -310,6 +310,36 @@ public sealed class PipelineTests : IDisposable
     }
 
     [Fact]
+    public async Task BatchCarriesTheContextCapturedForItsFirstLine()
+    {
+        var seen = new List<long>();
+        using var withContext = new TranslationPipeline(
+            new Configuration { DebounceMs = 50, MaxConcurrency = 2, CacheEnabled = false },
+            new ScriptLanguageDetector(),
+            cache,
+            translator,
+            OnFramework,
+            log,
+            first =>
+            {
+                seen.Add(first.Id);
+                return new TranslationContext { Channel = "Party:" + first.Original };
+            });
+
+        var a = TestUtil.JaLine("いち");
+        var b = TestUtil.JaLine("に");
+        OnFramework(() =>
+        {
+            withContext.Enqueue(a);
+            withContext.Enqueue(b);
+        });
+
+        await TestUtil.WaitUntil(() => a.Status == TranslationStatus.Done && b.Status == TranslationStatus.Done);
+        Assert.Equal([a.Id], seen); // built once, for the batch's first line, at enqueue time
+        Assert.Equal("Party:いち", Assert.Single(translator.Contexts)!.Channel);
+    }
+
+    [Fact]
     public async Task PinnedEntryAppliesWhenTheCacheIsOff()
     {
         using var noCache = new TranslationPipeline(
@@ -461,6 +491,8 @@ public sealed class PipelineTests : IDisposable
     {
         public ConcurrentQueue<IReadOnlyList<ChatLine>> BatchQueue { get; } = new();
 
+        public ConcurrentQueue<TranslationContext?> Contexts { get; } = new();
+
         public List<IReadOnlyList<ChatLine>> Batches => [.. BatchQueue];
 
         public Exception? Failure { get; set; }
@@ -472,8 +504,9 @@ public sealed class PipelineTests : IDisposable
         public int Cancelled;
 
         public async Task TranslateBatchAsync(
-            IReadOnlyList<ChatLine> lines, Lang target, IProgress<(long LineId, string Delta)> progress, CancellationToken ct)
+            IReadOnlyList<ChatLine> lines, Lang target, TranslationContext? context, IProgress<(long LineId, string Delta)> progress, CancellationToken ct)
         {
+            Contexts.Enqueue(context);
             BatchQueue.Enqueue(lines.ToArray());
             if (Failure is { } f)
             {

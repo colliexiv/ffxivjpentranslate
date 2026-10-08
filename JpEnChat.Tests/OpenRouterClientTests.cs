@@ -25,7 +25,7 @@ public class OpenRouterClientTests
         ReasoningEffort = "low",
     };
 
-    private static async Task<List<string>> Collect(OpenRouterClient client, Action<OpenRouterTiming>? onTiming = null)
+    private static async Task<List<string>> Collect(OpenRouterClient client, Action<LlmTiming>? onTiming = null)
     {
         var list = new List<string>();
         await foreach (var s in client.StreamChatAsync(Request, CancellationToken.None, onTiming))
@@ -50,7 +50,7 @@ public class OpenRouterClientTests
             "data: [DONE]",
             Sse.Delta("after done - ignored"));
         using var client = TestUtil.Client(handler);
-        OpenRouterTiming? timing = null;
+        LlmTiming? timing = null;
 
         var deltas = await Collect(client, t => timing = t);
 

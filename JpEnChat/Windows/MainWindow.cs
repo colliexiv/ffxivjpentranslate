@@ -1,7 +1,6 @@
 using System;
 using System.Collections.Generic;
 using System.Numerics;
-using System.Threading.Tasks;
 using Dalamud.Bindings.ImGui;
 using Dalamud.Game.Text;
 using Dalamud.Interface;
@@ -17,13 +16,13 @@ using JpEnChat.Ui;
 namespace JpEnChat.Windows;
 
 /// <summary>
-/// Two-pane chat window (PLAN §4). Top to bottom: optional no-key hint, toolbar, log, breakdown panel, input row.
+/// Two-pane chat log window (PLAN §4, §12). Top to bottom: optional no-key hint, toolbar, log. Sending happens from the
+/// game's own chat box (<see cref="QuickTranslatePopup"/>); this window has no input row.
 /// </summary>
 /// <remarks>
-/// The log child's height is whatever is left after reserving the panel (last frame's measured height) and the input
-/// row, so the panel pushes the log up instead of covering it. The log, panel and input use the game's Axis font at
-/// <see cref="Configuration.FontSizePx"/>; the toolbar keeps Dalamud's default font so icon buttons line up.
-/// Esc never closes this window (<see cref="Window.RespectCloseHotkey"/> is off); it drives the outgoing flow instead.
+/// The log uses the game's Axis font at <see cref="Configuration.FontSizePx"/>; the toolbar keeps Dalamud's default font
+/// so icon buttons line up. Esc never closes this window (<see cref="Window.RespectCloseHotkey"/> is off), so pressing
+/// Esc in the game's chat box does not hide the log.
 /// </remarks>
 public sealed class MainWindow : Window, IDisposable
 {
@@ -36,30 +35,19 @@ public sealed class MainWindow : Window, IDisposable
     private readonly Action openConfig;
     private readonly HashSet<XivChatType> hiddenChannels;
     private readonly ChatLogView logView;
-    private readonly OutgoingComposer composer;
 
     private readonly AxisFont font;
 
     /// <param name="configuration">Shared settings; read every frame (font size, timestamps, filter).</param>
-    /// <param name="log">Row store; the window reads it and the send path appends to it.</param>
-    /// <param name="translator">EN→JA structured translation for the outgoing flow.</param>
-    /// <param name="send">
-    /// Sends one full chat command (prefix + Japanese). Must perform the game call on the framework thread
-    /// (e.g. <c>text =&gt; framework.RunOnFrameworkThread(() =&gt; chatSender.Send(text))</c>). A faulted task's
-    /// message is shown in the panel.
-    /// </param>
+    /// <param name="log">Row store; the window reads it, ingest and the popup's send path append to it.</param>
     /// <param name="corrections">Retry, edit and pin actions of the log's rows (called on the draw thread).</param>
     /// <param name="currentWorld">Local player's current world name; the sender's world is shown only when it differs.</param>
-    /// <param name="localPlayerName">Local player name for rows the plugin sent; empty when unknown.</param>
     /// <param name="openConfig">Opens the settings window.</param>
     public MainWindow(
         Configuration configuration,
         ChatLog log,
-        IOutgoingTranslator translator,
-        Func<string, Task> send,
         ITranslationCorrections corrections,
         Func<string> currentWorld,
-        Func<string> localPlayerName,
         Action openConfig)
         : base("JP/EN Chat###JpEnChatMain", ImGuiWindowFlags.NoScrollbar | ImGuiWindowFlags.NoScrollWithMouse)
     {
@@ -69,7 +57,6 @@ public sealed class MainWindow : Window, IDisposable
 
         hiddenChannels = [.. configuration.HiddenLogChannels];
         logView = new ChatLogView(log, configuration, hiddenChannels, currentWorld, corrections);
-        composer = new OutgoingComposer(configuration, log, translator, send, localPlayerName);
         font = new AxisFont(configuration);
 
         RespectCloseHotkey = false;
@@ -82,18 +69,9 @@ public sealed class MainWindow : Window, IDisposable
         };
     }
 
-    public void Dispose()
-    {
-        composer.Dispose();
-        font.Dispose();
-    }
+    public void Dispose() => font.Dispose();
 
-    public override void OnOpen()
-    {
-        // Do not grab keyboard focus here: an active input box blocks game keys. Click the input (or press Enter
-        // after a send) to type.
-        logView.RequestScrollToBottom();
-    }
+    public override void OnOpen() => logView.RequestScrollToBottom();
 
     public override void Draw()
     {
@@ -102,24 +80,21 @@ public sealed class MainWindow : Window, IDisposable
             logView.InvalidateLayout();
         }
 
-        if (configuration.OpenRouterKeyProtected.Length == 0)
+        if (!configuration.HasActiveKey)
         {
-            ImGui.TextColored(ImGuiColors.DalamudYellow, "Set your OpenRouter key in /jpchat config");
+            ImGui.TextColored(
+                ImGuiColors.DalamudYellow,
+                configuration.Provider == LlmProvider.Anthropic
+                    ? "Set your Anthropic API key in /jpchat config"
+                    : "Set your OpenRouter key in /jpchat config");
         }
 
         DrawToolbar();
 
         using (font.Push())
         {
-            var reserved = composer.ReservedPanelHeight() + OutgoingComposer.InputRowHeight();
-            var logHeight = Math.Max(ImGui.GetContentRegionAvail().Y - reserved, 40f * ImGuiHelpers.GlobalScale);
-
-            logView.Draw(new Vector2(0f, logHeight));
-            composer.DrawPanel();
-            composer.DrawInputRow();
+            logView.Draw(new Vector2(0f, Math.Max(ImGui.GetContentRegionAvail().Y, 40f * ImGuiHelpers.GlobalScale)));
         }
-
-        composer.EndFrame(ImGui.IsWindowFocused(ImGuiFocusedFlags.RootAndChildWindows));
     }
 
     private void DrawToolbar()

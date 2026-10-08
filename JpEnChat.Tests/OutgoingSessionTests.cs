@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using JpEnChat.Models;
+using JpEnChat.Translation;
 using JpEnChat.Ui;
 using Xunit;
 
@@ -30,7 +31,7 @@ public class OutgoingSessionTests
     {
         private readonly ConcurrentQueue<Action> posted = new();
 
-        public Harness(string? prefix = "/p ", Func<string, Task>? send = null)
+        public Harness(string? prefix = "/p ", Func<string, Task>? send = null, Func<TranslationContext?>? context = null)
         {
             Prefix = prefix;
             Send = send ?? (command =>
@@ -38,7 +39,7 @@ public class OutgoingSessionTests
                 Sent.Add(command);
                 return Task.CompletedTask;
             });
-            Session = new OutgoingSession(Translator, c => Send(c), posted.Enqueue, Registers.Polite, () => Prefix, () => English);
+            Session = new OutgoingSession(Translator, c => Send(c), posted.Enqueue, OutgoingStyle.Polite, () => Prefix, () => English, context);
             Session.Sent += m => SentMessages.Add(m);
         }
 
@@ -120,7 +121,7 @@ public class OutgoingSessionTests
         var call = await h.NextCall();
         Assert.Equal("hello", call.Draft.EnglishText);
         Assert.Equal("/p ", call.Draft.ChannelPrefix);
-        Assert.Equal(Registers.Polite, call.Draft.Register);
+        Assert.Equal(OutgoingStyle.Polite, call.Draft.Style);
 
         call.Result.SetResult(call.Draft with { JapaneseText = "こんにちは" });
         await h.PumpUntil(() => h.Session.State == OutgoingState.Confirming);
@@ -286,20 +287,50 @@ public class OutgoingSessionTests
     }
 
     [Fact]
-    public async Task RegisterChangeRetranslates()
+    public async Task StyleChangeRetranslates()
     {
         var h = new Harness();
         await h.TranslateToConfirming("hello", "こんにちは");
 
-        h.Session.SetRegister(Registers.Casual);
+        h.Session.SetStyle(OutgoingStyle.Casual);
         Assert.Equal(OutgoingState.Translating, h.Session.State);
         var call = await h.NextCall();
-        Assert.Equal(Registers.Casual, call.Draft.Register);
+        Assert.Equal(OutgoingStyle.Casual, call.Draft.Style);
         Assert.Equal("hello", call.Draft.EnglishText);
 
-        // Same register again: nothing happens.
-        h.Session.SetRegister(Registers.Casual);
+        // Same style again: nothing happens.
+        h.Session.SetStyle(OutgoingStyle.Casual);
         Assert.True(h.Translator.Calls.IsEmpty);
+    }
+
+    [Fact]
+    public async Task EveryStyleIsSelectableAndContextIsCapturedPerRequest()
+    {
+        var count = 0;
+        var h = new Harness(context: () => new TranslationContext { Channel = "Party " + ++count });
+        await h.TranslateToConfirming("let's go", "行きましょう");
+
+        foreach (var style in new[] { OutgoingStyle.Cool, OutgoingStyle.Custom, OutgoingStyle.Polite })
+        {
+            h.Session.SetStyle(style);
+            var call = await h.NextCall();
+            Assert.Equal(style, call.Draft.Style);
+            Assert.Equal("let's go", call.Draft.EnglishText);
+            Assert.Equal("Party " + count, call.Draft.Context!.Channel);
+            call.Result.SetResult(call.Draft with { JapaneseText = "行こうか。" });
+            await h.PumpUntil(() => h.Session.State == OutgoingState.Confirming);
+        }
+
+        Assert.Equal(4, count); // one capture per request, on the calling thread
+    }
+
+    [Fact]
+    public async Task FailingContextDelegateDoesNotBlockTheTranslation()
+    {
+        var h = new Harness(context: () => throw new InvalidOperationException("no game"));
+        h.Session.StartTranslation("hi");
+        var call = await h.NextCall();
+        Assert.Null(call.Draft.Context);
     }
 
     [Fact]

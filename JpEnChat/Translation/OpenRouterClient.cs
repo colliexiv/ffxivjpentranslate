@@ -10,6 +10,7 @@ using System.Runtime.CompilerServices;
 using System.Text;
 using System.Text.Encodings.Web;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Text.Json.Serialization;
 using System.Threading;
 using System.Threading.Tasks;
@@ -49,21 +50,6 @@ public sealed record ChatRequest
     public bool RequireParameters { get; init; }
 }
 
-/// <summary>Timing and usage of one completed request, for the latency log (PLAN §3.4).</summary>
-/// <param name="Model">Model that actually served the request (differs from the requested one after a fallback).</param>
-/// <param name="Provider">Upstream provider name, when OpenRouter reports it.</param>
-/// <param name="FirstTokenMs">Milliseconds from send to the first non-empty content delta; null if none arrived.</param>
-/// <param name="TotalMs">Milliseconds from send to end of stream/body.</param>
-public sealed record OpenRouterTiming(
-    string? Model,
-    string? Provider,
-    double? FirstTokenMs,
-    double TotalMs,
-    int? PromptTokens,
-    int? CachedPromptTokens,
-    int? CompletionTokens,
-    string? FinishReason);
-
 /// <summary>
 /// Thin OpenRouter chat-completions client: one long-lived <see cref="HttpClient"/>, SSE streaming,
 /// structured error mapping. Owned by the plugin for its whole lifetime and disposed on unload.
@@ -77,7 +63,7 @@ public sealed record OpenRouterTiming(
 /// <para>The API key is read from the provider on every request (so config edits apply live), sent only as the
 /// <c>Authorization</c> header, and never logged. Request bodies are logged at Debug level only.</para>
 /// </remarks>
-public sealed class OpenRouterClient : IDisposable
+public sealed class OpenRouterClient : ILlmBackend, IDisposable
 {
     public static readonly Uri BaseAddress = new("https://openrouter.ai/api/v1/");
 
@@ -138,7 +124,7 @@ public sealed class OpenRouterClient : IDisposable
     public async IAsyncEnumerable<string> StreamChatAsync(
         ChatRequest req,
         [EnumeratorCancellation] CancellationToken ct = default,
-        Action<OpenRouterTiming>? onTiming = null)
+        Action<LlmTiming>? onTiming = null)
     {
         ArgumentNullException.ThrowIfNull(req);
         var timeout = CurrentTimeout();
@@ -185,7 +171,7 @@ public sealed class OpenRouterClient : IDisposable
             }
         }
 
-        onTiming?.Invoke(new OpenRouterTiming(
+        onTiming?.Invoke(new LlmTiming(
             state.Model, state.Provider, state.FirstTokenMs, sw.Elapsed.TotalMilliseconds,
             state.PromptTokens, state.CachedTokens, state.CompletionTokens, state.FinishReason));
     }
@@ -193,7 +179,7 @@ public sealed class OpenRouterClient : IDisposable
     /// <summary>Non-streaming completion; returns <c>choices[0].message.content</c>.</summary>
     /// <exception cref="OpenRouterException">Non-2xx status, error body, empty content, or <c>finish_reason: "error"</c>.</exception>
     /// <exception cref="TimeoutException">No complete response within twice the configured timeout.</exception>
-    public async Task<string> CompleteAsync(ChatRequest req, CancellationToken ct = default, Action<OpenRouterTiming>? onTiming = null)
+    public async Task<string> CompleteAsync(ChatRequest req, CancellationToken ct = default, Action<LlmTiming>? onTiming = null)
     {
         ArgumentNullException.ThrowIfNull(req);
         using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
@@ -238,7 +224,7 @@ public sealed class OpenRouterClient : IDisposable
         }
 
         var total = sw.Elapsed.TotalMilliseconds;
-        onTiming?.Invoke(new OpenRouterTiming(
+        onTiming?.Invoke(new LlmTiming(
             state.Model, state.Provider, total, total, state.PromptTokens, state.CachedTokens, state.CompletionTokens, state.FinishReason));
 
         if (string.IsNullOrEmpty(content))
@@ -247,6 +233,54 @@ public sealed class OpenRouterClient : IDisposable
         }
 
         return content;
+    }
+
+    /// <inheritdoc/>
+    public IAsyncEnumerable<string> StreamAsync(LlmRequest req, CancellationToken ct, Action<LlmTiming>? onTiming) =>
+        StreamChatAsync(ToChatRequest(req), ct, onTiming);
+
+    /// <inheritdoc/>
+    public Task<string> CompleteAsync(LlmRequest req, CancellationToken ct, Action<LlmTiming>? onTiming) =>
+        CompleteAsync(ToChatRequest(req), ct, onTiming);
+
+    /// <summary>
+    /// Maps a provider-neutral request to OpenRouter's: one system message (<see cref="LlmRequest.FullSystemPrompt"/>),
+    /// <see cref="LlmRequest.Effort"/> → <c>reasoning.effort</c> (thoughts excluded from the answer), a JSON schema →
+    /// strict <c>response_format</c> plus <c>provider.require_parameters</c>, and latency-sorted routing.
+    /// </summary>
+    public static ChatRequest ToChatRequest(LlmRequest req)
+    {
+        ArgumentNullException.ThrowIfNull(req);
+        return new ChatRequest
+        {
+            Model = req.Model,
+            FallbackModels = req.FallbackModels,
+            SystemPrompt = req.FullSystemPrompt,
+            UserContent = req.UserContent,
+            Temperature = req.Temperature,
+            MaxTokens = req.MaxTokens,
+            ReasoningEffort = string.IsNullOrWhiteSpace(req.Effort) ? null : req.Effort.Trim(),
+            ExcludeReasoning = true,
+            ProviderSort = "latency",
+            ResponseFormat = req.JsonSchema is { } schema ? ResponseFormatFor(schema) : null,
+            RequireParameters = req.JsonSchema is not null,
+        };
+    }
+
+    /// <summary>OpenRouter's strict <c>response_format</c> object for <paramref name="schema"/>.</summary>
+    public static JsonObject ResponseFormatFor(LlmJsonSchema schema)
+    {
+        ArgumentNullException.ThrowIfNull(schema);
+        return new JsonObject
+        {
+            ["type"] = "json_schema",
+            ["json_schema"] = new JsonObject
+            {
+                ["name"] = schema.Name,
+                ["strict"] = true,
+                ["schema"] = schema.Schema.DeepClone(),
+            },
+        };
     }
 
     public void Dispose() => http.Dispose();

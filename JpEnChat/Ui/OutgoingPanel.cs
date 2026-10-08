@@ -9,8 +9,8 @@ namespace JpEnChat.Ui;
 
 /// <summary>
 /// Draws an <see cref="OutgoingSession"/>: "Translating..." while a request is in flight, and while confirming the
-/// editable Japanese (JA box), the segment glosses, the back-translation and the polite/casual toggle; plus any error.
-/// Used by the main window's composer (above its input row) and by the quick-translate popup.
+/// editable Japanese (JA box), the segment glosses, the back-translation and the style selector
+/// (Polite / Casual / Cool / Custom); plus any error. Used by the quick-translate popup.
 /// </summary>
 /// <remarks>
 /// Keys handled here: Enter / Ctrl+Enter in the JA box → <see cref="OutgoingSession.Send"/>; Shift+Enter in the JA box
@@ -27,8 +27,6 @@ internal sealed class OutgoingPanel
     private readonly OutgoingSession session;
     private readonly string idSuffix;
 
-    private float measuredHeight;
-    private OutgoingState measuredState;
     private bool escapeFromInput;
 
     /// <param name="session">The state to draw and drive.</param>
@@ -51,8 +49,8 @@ internal sealed class OutgoingPanel
     /// <summary>When set, a <c>bytes/500</c> counter for prefix + Japanese is drawn next to the JA box.</summary>
     public Func<int>? PrefixByteCount { get; set; }
 
-    /// <summary>Height of the panel last frame in this state (0 when unknown or hidden).</summary>
-    public float MeasuredHeight(OutgoingState state) => measuredState == state ? measuredHeight : 0f;
+    /// <summary>Tooltip text of the Custom style button (e.g. the persona text).</summary>
+    public Func<string>? CustomStyleTooltip { get; set; }
 
     /// <summary>True once if Esc deactivated the JA box this frame.</summary>
     public bool ConsumeEscapeFromInput()
@@ -62,15 +60,11 @@ internal sealed class OutgoingPanel
         return value;
     }
 
-    /// <summary>Forgets the measured height (call when the panel is hidden).</summary>
-    public void ResetMeasurement() => measuredHeight = 0f;
-
     /// <summary>Draws the panel content as one group at the cursor; nothing when <see cref="OutgoingSession.PanelVisible"/> is false.</summary>
     public void Draw()
     {
         if (!session.PanelVisible)
         {
-            ResetMeasurement();
             return;
         }
 
@@ -104,9 +98,6 @@ internal sealed class OutgoingPanel
                 }
             }
         }
-
-        measuredHeight = ImGui.GetItemRectSize().Y;
-        measuredState = state;
     }
 
     private void DrawConfirming()
@@ -173,23 +164,30 @@ internal sealed class OutgoingPanel
             }
         }
 
-        var register = session.Register;
-        if (ImGui.RadioButton($"polite##{idSuffix}", register == Registers.Polite) && register != Registers.Polite)
+        var style = session.Style;
+        for (var i = 0; i < Styles.All.Length; i++)
         {
-            register = Registers.Polite;
+            var option = Styles.All[i];
+            if (i > 0)
+            {
+                ImGui.SameLine();
+            }
+
+            if (ImGui.RadioButton($"{Styles.Label(option)}##{idSuffix}", style == option))
+            {
+                style = option;
+            }
+
+            if (option == OutgoingStyle.Custom && ImGui.IsItemHovered())
+            {
+                ImGui.SetTooltip(CustomStyleTooltip?.Invoke() ?? "Your own persona (Settings → General)");
+            }
         }
 
-        ImGui.SameLine();
-        if (ImGui.RadioButton($"casual##{idSuffix}", register == Registers.Casual) && register != Registers.Casual)
-        {
-            register = Registers.Casual;
-        }
-
-        ImGui.SameLine();
         ImGui.TextDisabled(ConfirmHint);
 
         // Last, so a re-translate does not change the state halfway through drawing.
-        session.SetRegister(register);
+        session.SetStyle(style);
     }
 
     /// <summary>Flows <c>ja (reading) = en</c> glosses left to right, wrapping at the panel width.</summary>

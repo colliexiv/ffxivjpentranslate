@@ -16,7 +16,7 @@ namespace JpEnChat.Chat;
 /// <para>The handler runs on the framework thread and only copies what it needs: a row appears in the window the same
 /// frame, with "…" in the translation cell until the pipeline fills it. It never marks a message handled and never
 /// modifies it, and it never lets an exception escape into Dalamud's event dispatch.</para>
-/// <para><b>Own messages.</b> Lines from the local player are skipped (the outgoing composer adds its own rows), except
+/// <para><b>Own messages.</b> Lines from the local player are skipped (the quick-translate popup adds its own rows), except
 /// <see cref="XivChatType.TellOutgoing"/>, whose sender is the tell target: it is kept as an own row so tells typed in
 /// the vanilla chat box show up. A tell sent through this plugin already has a row, so its echo is dropped via
 /// <see cref="ExpectOwnEcho"/>.</para>

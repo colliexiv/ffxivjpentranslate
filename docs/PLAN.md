@@ -580,3 +580,62 @@ Trigger: a lone `ノ` (raised hand, "o/") came back as `/in`. Version 0.4.0.0.
   gained common chat conventions (ノ, ノシ, 88, greetings, ナイス…, tone markers 泣/笑, ね/よね). The player glossary
   (`Configuration.UserGlossary`, trimmed, blank lines dropped, ≤ 4,000 characters) is appended after the built-in
   prompt, so the byte-identical prefix still benefits from provider prompt caching.
+
+## 12. Phase 7: Claude API provider, context, styles, log-only window
+
+Trigger: Max/Team plans now include monthly Claude API credits (usable on the Claude API directly, not through
+OpenRouter), and Claude Haiku 5.5 (`claude-haiku-5-5`, $0.10/$0.50 per MTok, cache reads $0.01) launched 2026-10-07.
+Goals: let the player spend those credits, and raise translation quality. Version 0.5.0.0, config schema 2.
+
+- **Provider abstraction.** `Translation/ILlmBackend` takes a provider-neutral `LlmRequest` (model, fallback models,
+  `SystemPrompt` = built-in prompt, `SystemSuffix` = player glossary, user content, temperature, max tokens, effort,
+  `LlmJsonSchema`) and reports `LlmTiming`. `OpenRouterClient` implements it by mapping to its `ChatRequest`: one
+  system message (prompt + suffix), effort → `reasoning.effort` (excluded), schema → strict `response_format` +
+  `provider.require_parameters`; the wire body is byte-identical to 0.4.0 for the same inputs (tested).
+  `OpenRouterTranslator` became `LlmTranslator`; `BackendSwitch` delegates each call to the backend of
+  `Configuration.Provider` (`LlmProvider.OpenRouter` default, `Anthropic`), and the translator reads the provider once
+  per request so model id and backend always agree. Exceptions: `LlmException` base, `OpenRouterException`,
+  `AnthropicException` (`ErrorType`, `ApiMessage`), `LlmRefusalException` ("refused"), `MissingApiKeyException`.
+- **`AnthropicClient`** (Messages API, `x-api-key`, `anthropic-version: 2023-06-01`). `system` is two text blocks: the
+  built-in prompt with `cache_control: {type: "ephemeral"}`, then the glossary (omitted when empty), so only the stable
+  prefix is cached. Never sends `thinking` (adaptive is the default; `disabled`/`budget_tokens` 400 on the 5.5 models)
+  or `temperature` (non-default sampling parameters 400). `output_config.effort`: `low` for incoming batches
+  (`max_tokens` 4096), `AnthropicOutgoingEffort` (default `medium`) for outgoing (`max_tokens` 8192); thinking counts
+  against `max_tokens`. Structured output: `output_config.format = {type: "json_schema", schema}` (shape confirmed in
+  the claude-api skill: shared/model-migration.md "Prefill replacement", python tool-use.md, C# `JsonOutputFormat`).
+  `fallbacks: "default"` + `anthropic-beta: server-side-fallback-2026-07-01` only for `claude-sonnet-5-5*` /
+  `claude-opus-5-5*` when `AnthropicRefusalFallback` (default on); never for Haiku. Both calls stream SSE: only
+  `text_delta` is yielded (`thinking_delta` skipped), `message_start`/`message_delta` carry usage and `stop_reason`,
+  `message_stop` ends, an `error` event throws (type → status: overloaded 529, rate limit 429, …), `stop_reason:
+  "refusal"` throws `LlmRefusalException`. The configured timeout is an idle timeout, tripled until the first text
+  (silent thinking) and throughout `CompleteAsync`. Debug log: request body (key redacted); Information log per
+  response: input, `cache_read_input_tokens`, `cache_creation_input_tokens`, output, stop reason.
+- **Context.** `TranslationContext` (zone, duty, job, channel, recent lines) is built on the framework thread when a
+  batch's first line is queued (`TranslationPipeline` takes an optional `Func<ChatLine, TranslationContext?>`) and
+  when the popup starts a translation (`OutgoingDraft.Context`). `Chat/GameContextProvider` reads
+  `IClientState.TerritoryType` → Lumina `TerritoryType` → `PlaceName.ValueNullable.Name` and
+  `ContentFinderCondition.ValueNullable.Name` (duty only while `ICondition[ConditionFlag.BoundByDuty]`), cached per
+  territory, and the English `ClassJob.Abbreviation` of `IPlayerState.ClassJob`. `TranslationContextBuilder` takes the
+  last `ContextLines` (default 6, 0–15) log rows before the batch in the same channel (party = cross-world party; tells:
+  same partner), PF rows excluded, own rows as `Me`, translations only when finished, each line ≤ 120 characters. The
+  block goes into the user message only (the system prompts stay byte-identical for caching):
+  `Context (do not translate): zone=…; duty=…|none; my job=…; channel=…` / `Recent lines:` / `Sender: original →
+  translation` / `Translate:` / numbered lines. Both system prompts explain the block statically.
+- **Glossary.** About 80 more built-in terms (raid callouts such as 塔, 玉, 線取り, 誘導, AoE捨て, 無敵受け, 外周, 中外,
+  距離減衰; PF terms such as 練習PT, 安定, 詰め, 3滅解散, 1飯, 〆, 左取り抜け, 聞き専; chat slang; job nicknames), checked
+  against Japanese community glossaries and Lodestone blogs.
+- **Styles.** `OutgoingStyle { Polite, Casual, Cool, Custom }` replaces the polite/casual register. The style section
+  (`Style: <name> — <instruction>`) goes into the outgoing user message; Custom uses `CustomStyleText` (one line,
+  ≤ 500 characters; blank → Polite). The schema field is `style` (`polite|casual|cool|custom`). Config schema 2:
+  `DefaultRegister` ("casual" → `DefaultStyle = Casual`, else Polite) is read once by `Migrate` and never written.
+  The popup's selector is four radio buttons and re-translates on change; each intercepted line starts in
+  `DefaultStyle`.
+- **Window.** The composer (input row, channel combo, breakdown panel) is gone from the main window, which is now
+  toolbar + log; sending happens only from the game's chat box via the popup. `OutgoingComposer` was deleted
+  (`SentLines` and `FrameworkPost` moved to `Ui/SentLines.cs`), as were the composer-only parts of `OutgoingChannels`
+  and `OutgoingPanel`.
+- **Settings.** Translation tab: Provider combo, provider-specific model fields with presets (OpenRouter adds
+  `anthropic/claude-haiku-5.5`, `-sonnet-5.5`, `-opus-5.5`; Anthropic: `claude-haiku-5-5`, `claude-sonnet-5-5`,
+  `claude-opus-5-5`; Claude presets show list prices: Haiku 5.5 $0.10/$0.50, Sonnet 5.5 $2/$10, Opus 5.5 $4/$20 per
+  MTok), outgoing effort and refusal fallback for Anthropic, Context lines. General tab: outgoing style and custom
+  persona. Keys tab: Anthropic API key (DPAPI, `AnthropicKeyProtected`) with the credits note.

@@ -3,11 +3,13 @@ using System.Numerics;
 using System.Text;
 using System.Threading.Tasks;
 using Dalamud.Bindings.ImGui;
+using Dalamud.Game.Text;
 using Dalamud.Interface.Colors;
 using Dalamud.Interface.Utility;
 using Dalamud.Interface.Utility.Raii;
 using JpEnChat.Chat;
 using JpEnChat.Models;
+using JpEnChat.Translation;
 
 namespace JpEnChat.Ui;
 
@@ -17,8 +19,8 @@ namespace JpEnChat.Ui;
 /// </summary>
 /// <remarks>
 /// <para>Drawn with a plain <c>ImGui.Begin</c> from the plugin's draw handler (not a <c>Window</c>), so it never shows
-/// up in Dalamud's window list and Dalamud's Esc-closes-window handling does not apply. The state machine and the
-/// breakdown panel are the same <see cref="OutgoingSession"/>/<see cref="OutgoingPanel"/> the main window uses.</para>
+/// up in Dalamud's window list and Dalamud's Esc-closes-window handling does not apply. The state machine is
+/// <see cref="OutgoingSession"/> and the breakdown panel <see cref="OutgoingPanel"/>.</para>
 /// <para><b>Keys.</b> "Popup keys" are read when the popup is focused and none of its inputs is active, or when no
 /// ImGui text input is active anywhere (the keyboard belongs to the game), so Esc right after pressing Enter in the
 /// game's chat box cancels.</para>
@@ -29,7 +31,7 @@ namespace JpEnChat.Ui;
 /// <item><term>Confirming, Enter / Ctrl+Enter in JA box</term><description>Send prefix + Japanese (no prefix typed: the Japanese alone, to the chat box's selected channel); close.</description></item>
 /// <item><term>Confirming, Shift+Enter in JA box or "Send English"</term><description>Send the typed line unchanged; close.</description></item>
 /// <item><term>Confirming, Esc</term><description>Discard; close; restore the typed line as on cancel.</description></item>
-/// <item><term>Confirming, polite / casual</term><description>Re-translate with that register.</description></item>
+/// <item><term>Confirming, Polite / Casual / Cool / Custom</term><description>Re-translate in that style.</description></item>
 /// <item><term>Error shown, Esc</term><description>Close; restore the typed line as on cancel.</description></item>
 /// <item><term>Sending, any key</term><description>Ignored until the send completes (success closes; failure shows the error).</description></item>
 /// </list>
@@ -61,17 +63,19 @@ internal sealed class QuickTranslatePopup : IDisposable
     private string? notice;
     private double closeAt;
 
-    /// <param name="configuration">Settings (register default, popup offsets, font size).</param>
+    /// <param name="configuration">Settings (default style, custom persona, popup offsets, font size).</param>
     /// <param name="log">Row store; successful sends are added as rows.</param>
     /// <param name="translator">EN→JA structured translation.</param>
     /// <param name="send">Sends one full chat-box line through the hook bypass on the framework thread.</param>
     /// <param name="localPlayerName">Local player name for sent rows.</param>
+    /// <param name="context">Builds the game context for a message to a channel (and tell target); null sends none.</param>
     public QuickTranslatePopup(
         Configuration configuration,
         ChatLog log,
         IOutgoingTranslator translator,
         Func<string, Task> send,
-        Func<string> localPlayerName)
+        Func<string> localPlayerName,
+        Func<XivChatType, string?, TranslationContext?>? context = null)
     {
         this.configuration = configuration;
         this.log = log;
@@ -79,10 +83,11 @@ internal sealed class QuickTranslatePopup : IDisposable
         session = new OutgoingSession(
             translator,
             send,
-            OutgoingComposer.PostToFramework,
-            configuration.DefaultRegister,
+            FrameworkPost.Run,
+            configuration.DefaultStyle,
             () => current?.ChannelPrefix ?? string.Empty,
-            () => current?.Body ?? string.Empty);
+            () => current?.Body ?? string.Empty,
+            () => context is not null && current is { } m ? context(m.Kind, m.TellTarget) : null);
         session.Translated += () => focusWindow = true;
         session.Sent += OnSent;
         panel = new OutgoingPanel(session, "popup")
@@ -91,6 +96,9 @@ internal sealed class QuickTranslatePopup : IDisposable
             ErrorHint = "(Esc to close)",
             ShiftEnter = SendEnglish,
             PrefixByteCount = () => Encoding.UTF8.GetByteCount(current?.ChannelPrefix ?? string.Empty),
+            CustomStyleTooltip = () => configuration.CustomStyleText.Trim().Length == 0
+                ? "Custom persona is empty (Settings → General); Polite is used."
+                : "Your persona: " + configuration.CustomStyleText.Trim(),
         };
         font = new AxisFont(configuration);
     }
@@ -113,6 +121,7 @@ internal sealed class QuickTranslatePopup : IDisposable
         notice = null;
         focusWindow = false;
         session.Reset();
+        session.SetStyle(configuration.DefaultStyle); // each message starts in the default style
         session.StartTranslation(message.Body);
         open = true;
         return true;

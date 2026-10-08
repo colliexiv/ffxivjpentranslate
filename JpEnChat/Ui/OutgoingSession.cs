@@ -15,7 +15,7 @@ namespace JpEnChat.Ui;
 internal sealed record SentMessage(string Command, string English, string Japanese, bool Translated);
 
 /// <summary>
-/// The outgoing EN→JA state machine (PLAN §4.1), shared by the main window's composer and the quick-translate popup.
+/// The outgoing EN→JA state machine (PLAN §4.1) behind the quick-translate popup.
 /// No ImGui; <see cref="OutgoingPanel"/> draws it.
 /// </summary>
 /// <remarks>
@@ -35,6 +35,7 @@ internal sealed class OutgoingSession : IDisposable
     private readonly Action<Action> post;
     private readonly Func<string?> channelPrefix;
     private readonly Func<string> currentEnglish;
+    private readonly Func<TranslationContext?>? context;
 
     private CancellationTokenSource? cts;
     private int generation;
@@ -44,25 +45,29 @@ internal sealed class OutgoingSession : IDisposable
     /// <param name="translator">EN→JA structured translation.</param>
     /// <param name="send">Sends one full chat-box line; must do the game call on the framework thread.</param>
     /// <param name="post">Runs an action on the framework thread (completion callbacks).</param>
-    /// <param name="register">Initial register, one of <see cref="Registers"/>.</param>
+    /// <param name="style">Initial style.</param>
     /// <param name="channelPrefix">Prefix (with trailing space) for the line being sent, read at translate and send
     /// time; <c>null</c> means a tell without a target, which blocks sending.</param>
-    /// <param name="currentEnglish">The English currently shown to the user, used to re-translate after a register
+    /// <param name="currentEnglish">The English currently shown to the user, used to re-translate after a style
     /// change and to decide whether the Japanese box should take focus.</param>
+    /// <param name="context">Game context for the request, read on the calling (framework) thread when a translation
+    /// starts; null or a failing delegate sends none.</param>
     public OutgoingSession(
         IOutgoingTranslator translator,
         Func<string, Task> send,
         Action<Action> post,
-        string register,
+        OutgoingStyle style,
         Func<string?> channelPrefix,
-        Func<string> currentEnglish)
+        Func<string> currentEnglish,
+        Func<TranslationContext?>? context = null)
     {
         this.translator = translator ?? throw new ArgumentNullException(nameof(translator));
         this.send = send ?? throw new ArgumentNullException(nameof(send));
         this.post = post ?? throw new ArgumentNullException(nameof(post));
         this.channelPrefix = channelPrefix ?? throw new ArgumentNullException(nameof(channelPrefix));
         this.currentEnglish = currentEnglish ?? throw new ArgumentNullException(nameof(currentEnglish));
-        Register = register == Registers.Casual ? Registers.Casual : Registers.Polite;
+        this.context = context;
+        Style = Styles.Normalize(style);
     }
 
     /// <summary>Raised when a translation arrives (state is now Confirming).</summary>
@@ -85,8 +90,8 @@ internal sealed class OutgoingSession : IDisposable
     /// <summary>The last translation result while Confirming; null otherwise.</summary>
     public OutgoingDraft? Draft { get; private set; }
 
-    /// <summary>Requested register for the next translation; one of <see cref="Registers"/>.</summary>
-    public string Register { get; private set; }
+    /// <summary>Requested style for the next translation.</summary>
+    public OutgoingStyle Style { get; private set; }
 
     /// <summary>The English of the request in flight (or of the last request).</summary>
     public string RequestedEnglish { get; private set; } = string.Empty;
@@ -119,8 +124,9 @@ internal sealed class OutgoingSession : IDisposable
         var request = new OutgoingDraft
         {
             EnglishText = text,
-            Register = Register,
+            Style = Style,
             ChannelPrefix = channelPrefix() ?? string.Empty,
+            Context = CaptureContext(),
         };
 
         RequestedEnglish = text;
@@ -134,16 +140,16 @@ internal sealed class OutgoingSession : IDisposable
         _ = Task.Run(() => TranslateAsync(request, gen, token), CancellationToken.None);
     }
 
-    /// <summary>Changes the register; re-translates when it changed and a translation is shown or in flight.</summary>
-    public void SetRegister(string register)
+    /// <summary>Changes the style; re-translates when it changed and a translation is shown or in flight.</summary>
+    public void SetStyle(OutgoingStyle style)
     {
-        var value = register == Registers.Casual ? Registers.Casual : Registers.Polite;
-        if (value == Register)
+        var value = Styles.Normalize(style);
+        if (value == Style)
         {
             return;
         }
 
-        Register = value;
+        Style = value;
         if (State is OutgoingState.Confirming or OutgoingState.Translating)
         {
             Retranslate();
@@ -374,6 +380,23 @@ internal sealed class OutgoingSession : IDisposable
 
         cts.Cancel();
         DisposeCts();
+    }
+
+    private TranslationContext? CaptureContext()
+    {
+        if (context is null)
+        {
+            return null;
+        }
+
+        try
+        {
+            return context();
+        }
+        catch (Exception)
+        {
+            return null; // context is a quality hint; never block a translation on it
+        }
     }
 
     private void DisposeCts()
