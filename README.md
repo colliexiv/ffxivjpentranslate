@@ -67,6 +67,9 @@ The plugin hooks the function the chat box calls on Enter (ClientStructs' `Shell
 
 `/jpchat auto` turns the feature on or off and prints the new state in chat.
 
+**Typing minigames.** Keybound Brawler (the Gold Saucer typing game) sends the words you type through the chat input. The plugin never holds a line while its typing window is open, and it skips its two zones (territory 1359 and 1360) by default. To skip any other zone, stand in it and type `/jpchat here`; type it again to undo. The list is also under Settings → Vanilla chat.
+
+
 Popup keys:
 
 | State | Key | Action |

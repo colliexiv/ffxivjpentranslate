@@ -6,6 +6,7 @@ using Dalamud.Hooking;
 using FFXIVClientStructs.FFXIV.Client.System.String;
 using FFXIVClientStructs.FFXIV.Client.UI;
 using FFXIVClientStructs.FFXIV.Client.UI.Shell;
+using FFXIVClientStructs.FFXIV.Component.GUI;
 using FFXIVClientStructs.FFXIV.Component.Shell;
 using JpEnChat.Translation;
 using JpEnChat.Ui;
@@ -116,6 +117,8 @@ public sealed unsafe class ChatSendHook : IDisposable
     private readonly ILog log;
     private readonly Hook<ChatInputDelegate>? hook;
     private readonly HashSet<Type> loggedErrors = [];
+
+    private const string TypingMinigameAddon = "KTGInput";
 
     private bool bypass;
     private bool disposed;
@@ -248,7 +251,7 @@ public sealed unsafe class ChatSendHook : IDisposable
         InterceptResult decision;
         try
         {
-            if (IsMacroRunning())
+            if (IsMacroRunning() || IsExcludedTerritory() || IsTypingMinigameOpen())
             {
                 hook!.Original(self, message, uiModule);
                 return;
@@ -330,6 +333,23 @@ public sealed unsafe class ChatSendHook : IDisposable
     {
         var shell = RaptureShellModule.Instance();
         return shell != null && shell->MacroCurrentLine >= 0;
+    }
+
+    /// <summary>The player stands in a zone listed in <see cref="Configuration.ExcludedTerritories"/>.</summary>
+    private bool IsExcludedTerritory()
+    {
+        var territory = Services.ClientState.TerritoryType;
+        return territory != 0 && configuration.ExcludedTerritories.Contains(territory);
+    }
+
+    /// <summary>
+    /// The Keybound Brawler typing window (<c>KTGInput</c>) is open: words typed there go through the same chat
+    /// input function and must never be held for translation.
+    /// </summary>
+    private static bool IsTypingMinigameOpen()
+    {
+        var addon = Services.GameGui.GetAddonByName<AtkUnitBase>(TypingMinigameAddon);
+        return addon != null && addon->IsVisible;
     }
 
     private bool IsBypassModifierHeld()

@@ -109,7 +109,8 @@ public sealed class Plugin : IDalamudPlugin
         Services.CommandManager.AddHandler(CommandName, new CommandInfo(OnCommand)
         {
             HelpMessage = "Toggle the JP/EN chat window. \"/jpchat config\" opens settings. "
-                + "\"/jpchat auto\" toggles translating English typed into the game's chat box.",
+                + "\"/jpchat auto\" toggles translating English typed into the game's chat box. "
+                + "\"/jpchat here\" skips/unskips the current zone (typing minigames).",
         });
 
         pluginInterface.UiBuilder.Draw += OnDraw;
@@ -168,6 +169,31 @@ public sealed class Plugin : IDalamudPlugin
             var state = Configuration.InterceptVanillaChat ? "on" : "off";
             var note = chatSendHook.IsInstalled ? string.Empty : " (unavailable: the chat-box hook could not be installed; see /xllog)";
             Services.ChatGui.Print($"[JP/EN Chat] Translating English typed into the chat box: {state}{note}.");
+            return;
+        }
+
+        if (sub.Equals("here", StringComparison.OrdinalIgnoreCase))
+        {
+            var territory = Services.ClientState.TerritoryType;
+            if (territory == 0)
+            {
+                Services.ChatGui.Print("[JP/EN Chat] No zone loaded.");
+                return;
+            }
+
+            var name = GameContextProvider.ZoneName(territory);
+            var label = name.Length > 0 ? $"{name} ({territory})" : $"territory {territory}";
+            if (Configuration.ExcludedTerritories.Remove(territory))
+            {
+                Services.ChatGui.Print($"[JP/EN Chat] Chat-box translation is active again in {label}.");
+            }
+            else
+            {
+                Configuration.ExcludedTerritories.Add(territory);
+                Services.ChatGui.Print($"[JP/EN Chat] Chat-box translation is now skipped in {label}.");
+            }
+
+            Configuration.Save();
             return;
         }
 

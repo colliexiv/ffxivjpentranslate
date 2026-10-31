@@ -139,6 +139,16 @@ public sealed class Configuration : IPluginConfiguration
     /// <summary>Plain English typed into the game's chat box is translated in a popup before it is sent.</summary>
     public bool InterceptVanillaChat { get; set; } = true;
 
+    /// <summary>Keybound Brawler (Gold Saucer typing minigame): arena "w1en" 1359 and Keybound Square "w1eo" 1360.</summary>
+    public static readonly uint[] DefaultExcludedTerritories = [1359, 1360];
+
+    /// <summary>
+    /// Territories where the chat-box hook never holds a line (typing minigames send words through the chat input).
+    /// Toggle the current zone with <c>/jpchat here</c>.
+    /// </summary>
+    [JsonProperty(ObjectCreationHandling = ObjectCreationHandling.Replace)]
+    public List<uint> ExcludedTerritories { get; set; } = [.. DefaultExcludedTerritories];
+
     /// <summary>Lines starting with this are sent untranslated, with the prefix removed. 1–3 characters.</summary>
     public string BypassPrefix { get; set; } = DefaultBypassPrefix;
 

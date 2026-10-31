@@ -9,6 +9,7 @@ using Dalamud.Interface.Components;
 using Dalamud.Interface.Utility;
 using Dalamud.Interface.Utility.Raii;
 using Dalamud.Interface.Windowing;
+using JpEnChat.Chat;
 using JpEnChat.Models;
 using JpEnChat.Translation;
 using JpEnChat.Ui;
@@ -547,6 +548,38 @@ public sealed class ConfigWindow : Window, IDisposable
             "Only lines that are plain English are held back. Japanese, commands such as /dance or /xlplugins, /e echo, "
             + "links, numbers and item links are always sent unchanged. Toggle quickly with /jpchat auto.");
 
+        ImGui.Spacing();
+        ImGui.TextUnformatted("Zones where typed text is never held");
+        ImGuiComponents.HelpMarker(
+            "Typing minigames send words through the chat input. The Keybound Brawler typing window is always detected "
+            + "and skipped; these zones are skipped as well. Toggle the zone you are in with /jpchat here.");
+        uint? removeZone = null;
+        foreach (var territory in configuration.ExcludedTerritories)
+        {
+            var zoneName = GameContextProvider.ZoneName(territory);
+            ImGui.BulletText(zoneName.Length > 0 ? $"{zoneName} ({territory})" : $"Territory {territory}");
+            ImGui.SameLine();
+            if (ImGui.SmallButton($"Remove##zone{territory}"))
+            {
+                removeZone = territory;
+            }
+        }
+
+        if (removeZone is { } zoneToRemove)
+        {
+            configuration.ExcludedTerritories.Remove(zoneToRemove);
+            Commit();
+        }
+
+        var currentTerritory = Services.ClientState.TerritoryType;
+        if (currentTerritory != 0 && !configuration.ExcludedTerritories.Contains(currentTerritory)
+            && ImGui.Button("Skip the zone I am in now"))
+        {
+            configuration.ExcludedTerritories.Add(currentTerritory);
+            Commit();
+        }
+
+        ImGui.Spacing();
         var modifierIndex = Math.Max(Array.IndexOf(ModifierValues, configuration.BypassModifier), 0);
         ImGui.SetNextItemWidth(ImGui.GetFontSize() * 6f);
         using (var combo = ImRaii.Combo("Send untranslated with modifier + Enter", ModifierLabels[modifierIndex]))

@@ -31,6 +31,18 @@ internal sealed class GameContextProvider
         return new GameEnvironment(cachedZone, duty, CurrentJob());
     }
 
+    /// <summary>Display name of a territory (its PlaceName), or empty when unknown. Framework/draw thread only.</summary>
+    public static string ZoneName(uint territory)
+    {
+        if (territory == 0)
+        {
+            return string.Empty;
+        }
+
+        var row = Services.DataManager.GetExcelSheet<TerritoryType>().GetRowOrDefault(territory);
+        return row is { } t ? t.PlaceName.ValueNullable?.Name.ExtractText() ?? string.Empty : string.Empty;
+    }
+
     private void RefreshTerritory()
     {
         uint territory = Services.ClientState.TerritoryType;
